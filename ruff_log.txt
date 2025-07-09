@@ -1,0 +1,885 @@
+symbolic_agi\agent.py:371:58: W292 [*] No newline at end of file
+    |
+369 |             return {"status": "failure", "error": "No content returned from LLM."}
+370 |         except Exception as e:
+371 |             return {"status": "failure", "error": str(e)}
+    |                                                          ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\agi_controller.py:351:28: W292 [*] No newline at end of file
+    |
+350 |         if needs_saving:
+351 |             self.ltm.save()
+    |                            ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\api_client.py:40:101: E501 Line too long (111 > 100)
+   |
+38 |     try:
+39 |         with metrics.API_CALL_LATENCY.labels(model=model_to_use).time():
+40 |             response = cast(ChatCompletion, await client.chat.completions.create(model=model_to_use, **kwargs))
+   |                                                                                                     ^^^^^^^^^^^ E501
+41 |
+42 |         if response.usage:
+   |
+
+symbolic_agi\api_client.py:43:101: E501 Line too long (111 > 100)
+   |
+42 |         if response.usage:
+43 |             metrics.LLM_TOKEN_USAGE.labels(model=model_to_use, type="prompt").inc(response.usage.prompt_tokens)
+   |                                                                                                     ^^^^^^^^^^^ E501
+44 |             metrics.LLM_TOKEN_USAGE.labels(model=model_to_use, type="completion").inc(response.usage.completion_tokens)
+   |
+
+symbolic_agi\api_client.py:44:101: E501 Line too long (119 > 100)
+   |
+42 |         if response.usage:
+43 |             metrics.LLM_TOKEN_USAGE.labels(model=model_to_use, type="prompt").inc(response.usage.prompt_tokens)
+44 |             metrics.LLM_TOKEN_USAGE.labels(model=model_to_use, type="completion").inc(response.usage.completion_tokens)
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^ E501
+45 |
+46 |         return response
+   |
+
+symbolic_agi\api_client.py:63:101: E501 Line too long (109 > 100)
+   |
+62 | …     if response.usage:
+63 | …         metrics.LLM_TOKEN_USAGE.labels(model=model_name, type="prompt").inc(response.usage.prompt_tokens)
+   |                                                                                                   ^^^^^^^^^ E501
+64 | …         metrics.LLM_TOKEN_USAGE.labels(model=model_name, type="completion").inc(response.usage.total_tokens - response.usage.prompt_…
+   |
+
+symbolic_agi\api_client.py:64:101: E501 Line too long (143 > 100)
+   |
+62 | …
+63 | …e, type="prompt").inc(response.usage.prompt_tokens)
+64 | …e, type="completion").inc(response.usage.total_tokens - response.usage.prompt_tokens)
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+65 | …
+66 | …
+   |
+
+symbolic_agi\consciousness.py:36:101: E501 Line too long (123 > 100)
+   |
+35 |         if "drives" not in self.profile:
+36 |             logging.info(f"Consciousness profile missing or incomplete. Creating with default drives at: {self.file_path}")
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^ E501
+37 |             self.drives = {"curiosity": 0.6, "competence": 0.5, "social_connection": 0.5}
+38 |             self._save_profile()
+   |
+
+symbolic_agi\consciousness.py:47:101: E501 Line too long (121 > 100)
+   |
+45 |                     return json.load(f)
+46 |             except (json.JSONDecodeError, TypeError):
+47 |                 logging.warning(f"Could not parse consciousness profile at {self.file_path}. A new one will be created.")
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^ E501
+48 |                 return {}
+49 |         return {}
+   |
+
+symbolic_agi\consciousness.py:95:101: E501 Line too long (113 > 100)
+   |
+93 |         return "\n".join(narrative_parts)
+94 |
+95 |     async def meta_reflect(self: "Consciousness", identity: "SymbolicIdentity", memory: "SymbolicMemory") -> str:
+   |                                                                                                     ^^^^^^^^^^^^^ E501
+96 |         """
+97 |         Generates an inner monologue based on the current state and saves it as a life event.
+   |
+
+symbolic_agi\consciousness.py:101:101: E501 Line too long (104 > 100)
+    |
+ 99 |         """
+100 |         recent_memories = memory.get_recent_memories(n=5)
+101 |         recent_memories_str = json.dumps([m.model_dump(mode='json') for m in recent_memories], indent=2)
+    |                                                                                                     ^^^^ E501
+102 |
+103 |         prompt = f"""
+    |
+
+symbolic_agi\consciousness.py:109:101: E501 Line too long (133 > 100)
+    |
+107 | Recent Detailed Memories: {recent_memories_str}
+108 | Drives: {json.dumps(self.drives)}
+109 | Write an inner monologue in first person ("I..."). Describe your state of mind, your active drives, and what you want most right now.
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+110 | """
+111 |         response = await monitored_chat_completion(role="meta", messages=[{"role": "system", "content": prompt}])
+    |
+
+symbolic_agi\consciousness.py:111:101: E501 Line too long (113 > 100)
+    |
+109 | Write an inner monologue in first person ("I..."). Describe your state of mind, your active drives, and what you want most right now.
+110 | """
+111 |         response = await monitored_chat_completion(role="meta", messages=[{"role": "system", "content": prompt}])
+    |                                                                                                     ^^^^^^^^^^^^^ E501
+112 |
+113 |         monologue: str
+    |
+
+symbolic_agi\consciousness.py:114:101: E501 Line too long (110 > 100)
+    |
+113 |         monologue: str
+114 |         if not response.choices or not response.choices[0].message or not response.choices[0].message.content:
+    |                                                                                                     ^^^^^^^^^^ E501
+115 |             monologue = "(The reflection returned an empty thought.)"
+116 |         else:
+    |
+
+symbolic_agi\consciousness.py:122:101: E501 Line too long (113 > 100)
+    |
+120 |         return monologue
+121 |
+122 |     def update_drives_from_experience(self, experience_type: str, success: bool, intensity: float = 0.1) -> None:
+    |                                                                                                     ^^^^^^^^^^^^^ E501
+123 |         """
+124 |         Updates drives based on experiences. Successful experiences slightly satisfy drives,
+    |
+
+symbolic_agi\consciousness.py:146:101: E501 Line too long (154 > 100)
+    |
+145 | …
+146 | …f.drives[drive_name]:.2f} from {experience_type} ({'success' if success else 'failure'})")
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+147 | …
+148 | …
+    |
+
+symbolic_agi\ethical_governance.py:176:25: W292 [*] No newline at end of file
+    |
+174 |         except Exception as e:
+175 |             logging.error("Self-modification evaluation failed: %s", e, exc_info=True)
+176 |             return False
+    |                         ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\execution_unit.py:708:101: E501 Line too long (122 > 100)
+    |
+706 |         agent_name: Optional[str] = None,
+707 |     ) -> None:
+708 |         """Handles a failed plan step by updating emotions, analyzing the failure, decaying trust, and then replanning."""
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^ E501
+709 |         logging.error(
+710 |             "Plan failed for goal '%s' at step '%s': %s",
+    |
+
+symbolic_agi\execution_unit.py:821:81: W292 [*] No newline at end of file
+    |
+819 |     # --- FIX: Removed dead code ---
+820 |     # This method was unused and contained incorrect logic. The main execution loop
+821 |     # correctly uses `self.agi.execute_single_action` from the `agi_controller`.
+    |                                                                                 ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\long_term_memory.py:175:24: W292 [*] No newline at end of file
+    |
+173 |         if goal_id in self.goals and self.goals[goal_id].sub_tasks:
+174 |             self.goals[goal_id].sub_tasks.pop(0)
+175 |             self.save()
+    |                        ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\meta_cognition.py:389:77: W292 [*] No newline at end of file
+    |
+387 |                 await self._meta_task
+388 |             except asyncio.CancelledError:
+389 |                 logging.info("Background meta-task successfully cancelled.")
+    |                                                                             ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\micro_world.py:24:101: E501 Line too long (110 > 100)
+   |
+22 |     def __init__(self: 'MicroWorld'):
+23 |         self.room_map = {
+24 |             "hallway": {"desc": "A main hallway with doors to room1 and room2.", "exits": ["room1", "room2"]},
+   |                                                                                                     ^^^^^^^^^^ E501
+25 |             "room1":   {"desc": "A small room with a locked chest and sticks.", "exits": ["hallway"]},
+26 |             "room2":   {"desc": "A stone room with a heavy rock and a notice board.", "exits": ["hallway"]},
+   |
+
+symbolic_agi\micro_world.py:25:101: E501 Line too long (102 > 100)
+   |
+23 |         self.room_map = {
+24 |             "hallway": {"desc": "A main hallway with doors to room1 and room2.", "exits": ["room1", "room2"]},
+25 |             "room1":   {"desc": "A small room with a locked chest and sticks.", "exits": ["hallway"]},
+   |                                                                                                     ^^ E501
+26 |             "room2":   {"desc": "A stone room with a heavy rock and a notice board.", "exits": ["hallway"]},
+27 |         }
+   |
+
+symbolic_agi\micro_world.py:26:101: E501 Line too long (108 > 100)
+   |
+24 |             "hallway": {"desc": "A main hallway with doors to room1 and room2.", "exits": ["room1", "room2"]},
+25 |             "room1":   {"desc": "A small room with a locked chest and sticks.", "exits": ["hallway"]},
+26 |             "room2":   {"desc": "A stone room with a heavy rock and a notice board.", "exits": ["hallway"]},
+   |                                                                                                     ^^^^^^^^ E501
+27 |         }
+28 |         self.state_file_path = os.path.join(config.DATA_DIR, "microworld_state.json")
+   |
+
+symbolic_agi\micro_world.py:41:101: E501 Line too long (126 > 100)
+   |
+39 |             ],
+40 |             "objects": [
+41 |                 {"name": "Chest", "location": "room1", "state": "locked", "description": "A heavy wooden chest with a lock."},
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+42 |                 {"name": "Rock", "location": "room2", "description": "A rough gray rock."},
+43 |                 {"name": "Stick", "location": "room1", "description": "A sturdy wooden stick."},
+   |
+
+symbolic_agi\micro_world.py:45:101: E501 Line too long (124 > 100)
+   |
+43 |                 {"name": "Stick", "location": "room1", "description": "A sturdy wooden stick."},
+44 |                 {"name": "Key", "location": "room2", "description": "A small iron key."},
+45 |                 {"name": "NoticeBoard", "location": "room2", "description": "A faded notice board covered with old papers."}
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^ E501
+46 |             ],
+47 |             "doors": [
+   |
+
+symbolic_agi\micro_world.py:79:101: E501 Line too long (123 > 100)
+   |
+77 |             logging.error(f"Failed to save MicroWorld state: {e}", exc_info=True)
+78 |
+79 |     def add_agent(self: 'MicroWorld', name: str, location: str = "hallway", inventory: Optional[List[str]] = None) -> None:
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^ E501
+80 |         """Adds a new agent to the world."""
+81 |         if inventory is None:
+   |
+
+symbolic_agi\micro_world.py:113:101: E501 Line too long (149 > 100)
+    |
+111 | …
+112 | …e_exits)
+113 | …["doors"] if d["from"] == agent["location"] and d["to"] == new_location and d["locked"])
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+114 | …
+115 | …
+    |
+
+symbolic_agi\micro_world.py:116:101: E501 Line too long (125 > 100)
+    |
+114 |                         if not is_locked:
+115 |                             agent["location"] = new_location
+116 |                             self.state["events"].append({"event_type": "wander", "agent": agent["name"], "to": new_location})
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+117 |                             state_changed = True
+118 |                         else:
+    |
+
+symbolic_agi\micro_world.py:119:101: E501 Line too long (126 > 100)
+    |
+117 |                             state_changed = True
+118 |                         else:
+119 |                             logging.debug(f"Agent {agent['name']} tried to wander to {new_location} but the door was locked.")
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+120 |
+121 |         except Exception as e:
+    |
+
+symbolic_agi\micro_world.py:146:101: E501 Line too long (105 > 100)
+    |
+144 |             if not required_params.issubset(provided_params):
+145 |                 missing = required_params - provided_params
+146 |                 error_msg = f"World action '{action}' missing required parameters: {', '.join(missing)}."
+    |                                                                                                     ^^^^^ E501
+147 |                 logging.error(error_msg)
+148 |                 return {"status": "failure", "description": error_msg}
+    |
+
+symbolic_agi\micro_world.py:177:101: E501 Line too long (131 > 100)
+    |
+175 |         current_room_exits = self.room_map.get(agent["location"], {}).get("exits", [])
+176 |         if new_location not in current_room_exits:
+177 |             return {"status": "failure", "description": f"Cannot move from {agent['location']} to {new_location}. No direct exit."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+178 |
+179 |         for door in self.state["doors"]:
+    |
+
+symbolic_agi\micro_world.py:181:101: E501 Line too long (101 > 100)
+    |
+179 |         for door in self.state["doors"]:
+180 |             if door["from"] == agent["location"] and door["to"] == new_location and door["locked"]:
+181 |                 return {"status": "failure", "description": f"The door to {new_location} is locked."}
+    |                                                                                                     ^ E501
+182 |
+183 |         agent["location"] = new_location
+    |
+
+symbolic_agi\micro_world.py:186:101: E501 Line too long (110 > 100)
+    |
+184 |         return {"status": "success", "description": f"{agent_name} moves to {new_location}."}
+185 |
+186 |     def _action_read(self: 'MicroWorld', object_name: str, agent_name: str = "SymbolicAGI") -> Dict[str, Any]:
+    |                                                                                                     ^^^^^^^^^^ E501
+187 |         """Allows an agent to read an object's description."""
+188 |         agent = self.get_agent(agent_name)
+    |
+
+symbolic_agi\micro_world.py:195:101: E501 Line too long (118 > 100)
+    |
+193 |             return {"status": "failure", "description": f"Object '{object_name}' not found."}
+194 |         if agent["location"] != obj.get("location"):
+195 |             return {"status": "failure", "description": f"{agent_name} is not in the same location as {object_name}."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^ E501
+196 |         desc = obj.get("description", f"You see a {object_name}.")
+197 |         details = f"State: {obj.get('state', 'normal')}" if "state" in obj else ""
+    |
+
+symbolic_agi\micro_world.py:198:101: E501 Line too long (114 > 100)
+    |
+196 |         desc = obj.get("description", f"You see a {object_name}.")
+197 |         details = f"State: {obj.get('state', 'normal')}" if "state" in obj else ""
+198 |         return {"status": "success", "description": f"{agent_name} reads {object_name}: {desc} {details}".strip()}
+    |                                                                                                     ^^^^^^^^^^^^^^ E501
+199 |
+200 |     def _action_pickup(self: 'MicroWorld', agent_name: str, object_name: str) -> Dict[str, Any]:
+    |
+
+symbolic_agi\micro_world.py:207:101: E501 Line too long (114 > 100)
+    |
+205 |             return {"status": "failure", "description": "Agent or object not found."}
+206 |         if agent["location"] != obj.get("location"):
+207 |             return {"status": "failure", "description": f"{object_name} is not in the same room as {agent_name}."}
+    |                                                                                                     ^^^^^^^^^^^^^^ E501
+208 |
+209 |         if obj.get("state") == "fixed":
+    |
+
+symbolic_agi\micro_world.py:223:101: E501 Line too long (114 > 100)
+    |
+221 |             return {"status": "failure", "description": "Agent or object not found."}
+222 |         if object_name not in agent["inventory"]:
+223 |             return {"status": "failure", "description": f"{agent_name} does not have {object_name} in inventory."}
+    |                                                                                                     ^^^^^^^^^^^^^^ E501
+224 |         agent["inventory"].remove(object_name)
+225 |         obj["location"] = agent["location"]
+    |
+
+symbolic_agi\micro_world.py:226:101: E501 Line too long (114 > 100)
+    |
+224 |         agent["inventory"].remove(object_name)
+225 |         obj["location"] = agent["location"]
+226 |         return {"status": "success", "description": f"{agent_name} dropped {object_name} in {agent['location']}."}
+    |                                                                                                     ^^^^^^^^^^^^^^ E501
+227 |
+228 |     def _action_open(self: 'MicroWorld', agent_name: str, object_name: str) -> Dict[str, Any]:
+    |
+
+symbolic_agi\micro_world.py:235:101: E501 Line too long (118 > 100)
+    |
+233 |             return {"status": "failure", "description": "Agent or object not found."}
+234 |         if agent["location"] != obj.get("location"):
+235 |             return {"status": "failure", "description": f"{agent_name} is not in the same location as {object_name}."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^ E501
+236 |
+237 |         if object_name == "Chest":
+    |
+
+symbolic_agi\micro_world.py:243:101: E501 Line too long (103 > 100)
+    |
+241 |                     return {"status": "success", "description": "Unlocked the Chest with the Key!"}
+242 |                 else:
+243 |                     return {"status": "failure", "description": "The Chest is locked. You need a Key."}
+    |                                                                                                     ^^^ E501
+244 |             elif obj.get("state") == "unlocked":
+245 |                 return {"status": "success", "description": "The Chest is already unlocked."}
+    |
+
+symbolic_agi\micro_world.py:249:101: E501 Line too long (124 > 100)
+    |
+247 |                  return {"status": "success", "description": "The Chest is already open."}
+248 |             else:
+249 |                  return {"status": "failure", "description": f"The Chest state is {obj.get('state')} and cannot be opened."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^ E501
+250 |
+251 |         return {"status": "failure", "description": f"{object_name} cannot be opened or is already open."}
+    |
+
+symbolic_agi\micro_world.py:251:101: E501 Line too long (106 > 100)
+    |
+249 |                  return {"status": "failure", "description": f"The Chest state is {obj.get('state')} and cannot be opened."}
+250 |
+251 |         return {"status": "failure", "description": f"{object_name} cannot be opened or is already open."}
+    |                                                                                                     ^^^^^^ E501
+252 |
+253 |     async def _action_ask(self: 'MicroWorld', asking_agent: str, target_agent: str, question: str) -> Dict[str, Any]:
+    |
+
+symbolic_agi\micro_world.py:253:101: E501 Line too long (117 > 100)
+    |
+251 |         return {"status": "failure", "description": f"{object_name} cannot be opened or is already open."}
+252 |
+253 |     async def _action_ask(self: 'MicroWorld', asking_agent: str, target_agent: str, question: str) -> Dict[str, Any]:
+    |                                                                                                     ^^^^^^^^^^^^^^^^^ E501
+254 |         """Allows an agent to ask another agent (or user) a question."""
+255 |         agent = self.get_agent(asking_agent)
+    |
+
+symbolic_agi\micro_world.py:260:101: E501 Line too long (121 > 100)
+    |
+258 |             return {"status": "failure", "description": "Asking agent or target agent not found."}
+259 |         if agent["location"] != target["location"]:
+260 |             return {"status": "failure", "description": f"{target_agent} is not in the same location as {asking_agent}."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^ E501
+261 |
+262 |         if target_agent.lower() == "user":
+    |
+
+symbolic_agi\micro_world.py:272:101: E501 Line too long (120 > 100)
+    |
+270 |                 f"Answer in character as {target_agent} and keep it concise:"
+271 |             )
+272 |             resp = await monitored_chat_completion(role="tool_action", messages=[{"role": "system", "content": prompt}])
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^ E501
+273 |             answer = resp.choices[0].message.content.strip() if resp.choices and resp.choices[0].message.content else "..."
+274 |         except Exception as e:
+    |
+
+symbolic_agi\micro_world.py:273:101: E501 Line too long (123 > 100)
+    |
+271 |             )
+272 |             resp = await monitored_chat_completion(role="tool_action", messages=[{"role": "system", "content": prompt}])
+273 |             answer = resp.choices[0].message.content.strip() if resp.choices and resp.choices[0].message.content else "..."
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^ E501
+274 |         except Exception as e:
+275 |             logging.error(f"LLM for _action_ask error: {e}")
+    |
+
+symbolic_agi\micro_world.py:298:101: E501 Line too long (117 > 100)
+    |
+296 |         return {
+297 |             "status": "success",
+298 |             "description": f"You are in {location}. {room['desc']} You see: {', '.join(objects_here) or 'nothing'}. "
+    |                                                                                                     ^^^^^^^^^^^^^^^^^ E501
+299 |                            f"Others here: {', '.join(agents_here) or 'no one'}."
+300 |         }
+    |
+
+symbolic_agi\micro_world.py:302:101: E501 Line too long (116 > 100)
+    |
+300 |         }
+301 |
+302 |     def _action_give(self: 'MicroWorld', giving_agent: str, item_name: str, receiving_agent: str) -> Dict[str, Any]:
+    |                                                                                                     ^^^^^^^^^^^^^^^^ E501
+303 |         """Allows an agent to give an item to another agent."""
+304 |         agent = self.get_agent(giving_agent)
+    |
+
+symbolic_agi\micro_world.py:309:101: E501 Line too long (108 > 100)
+    |
+308 |         if not agent or not recipient or not obj:
+309 |             return {"status": "failure", "description": "Giving agent, receiving agent, or item not found."}
+    |                                                                                                     ^^^^^^^^ E501
+310 |
+311 |         if agent["location"] != recipient["location"]:
+    |
+
+symbolic_agi\micro_world.py:315:101: E501 Line too long (114 > 100)
+    |
+314 |         if item_name not in agent["inventory"]:
+315 |             return {"status": "failure", "description": f"{giving_agent} does not have {item_name} in inventory."}
+    |                                                                                                     ^^^^^^^^^^^^^^ E501
+316 |
+317 |         agent["inventory"].remove(item_name)
+    |
+
+symbolic_agi\micro_world.py:321:101: E501 Line too long (109 > 100)
+    |
+319 |         obj["location"] = "inventory"
+320 |
+321 |         return {"status": "success", "description": f"{giving_agent} gave {item_name} to {receiving_agent}."}
+    |                                                                                                     ^^^^^^^^^ E501
+322 |
+323 |     def _action_combine(self: 'MicroWorld', agent_name: str, item1_name: str, item2_name: str) -> Dict[str, Any]:
+    |
+
+symbolic_agi\micro_world.py:323:101: E501 Line too long (113 > 100)
+    |
+321 |         return {"status": "success", "description": f"{giving_agent} gave {item_name} to {receiving_agent}."}
+322 |
+323 |     def _action_combine(self: 'MicroWorld', agent_name: str, item1_name: str, item2_name: str) -> Dict[str, Any]:
+    |                                                                                                     ^^^^^^^^^^^^^ E501
+324 |         """Allows an agent to combine two items."""
+325 |         agent = self.get_agent(agent_name)
+    |
+
+symbolic_agi\micro_world.py:330:101: E501 Line too long (101 > 100)
+    |
+329 |         if item1_name not in agent["inventory"] or item2_name not in agent["inventory"]:
+330 |             return {"status": "failure", "description": "Agent does not have both items to combine."}
+    |                                                                                                     ^ E501
+331 |
+332 |         if {item1_name, item2_name} == {"Stick", "Rock"}:
+    |
+
+symbolic_agi\micro_world.py:340:101: E501 Line too long (148 > 100)
+    |
+338 | …
+339 | …
+340 | …location": "inventory", "description": "A crude hammer made from a stick and a rock."})
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+341 | …ent_name} crafted a Hammer."}
+    |
+
+symbolic_agi\micro_world.py:345:101: E501 Line too long (109 > 100)
+    |
+343 |         return {"status": "failure", "description": "These items cannot be combined."}
+344 |
+345 |     def _action_use(self: 'MicroWorld', agent_name: str, item_name: str, target_name: str) -> Dict[str, Any]:
+    |                                                                                                     ^^^^^^^^^ E501
+346 |         """Allows an agent to use an item on a target."""
+347 |         agent = self.get_agent(agent_name)
+    |
+
+symbolic_agi\micro_world.py:351:101: E501 Line too long (107 > 100)
+    |
+349 |             return {"status": "failure", "description": "Agent not found."}
+350 |         if item_name not in agent["inventory"]:
+351 |             return {"status": "failure", "description": f"Agent does not have a {item_name} in inventory."}
+    |                                                                                                     ^^^^^^^ E501
+352 |
+353 |         target = self.get_object(target_name)
+    |
+
+symbolic_agi\micro_world.py:358:101: E501 Line too long (123 > 100)
+    |
+357 |         if target.get("location") != agent["location"]:
+358 |              return {"status": "failure", "description": f"The {target_name} is not in the same location as {agent_name}."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^ E501
+359 |
+360 |         if item_name == "Hammer" and target_name == "Chest" and target.get("state") == "locked":
+    |
+
+symbolic_agi\micro_world.py:362:101: E501 Line too long (120 > 100)
+    |
+360 |         if item_name == "Hammer" and target_name == "Chest" and target.get("state") == "locked":
+361 |             target["state"] = "unlocked"
+362 |             return {"status": "success", "description": f"{agent_name} used the Hammer to break the lock on the Chest."}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^ E501
+363 |
+364 |         return {"status": "failure", "description": f"The {item_name} has no effect on the {target_name}."}
+    |
+
+symbolic_agi\micro_world.py:364:101: E501 Line too long (107 > 100)
+    |
+362 |             return {"status": "success", "description": f"{agent_name} used the Hammer to break the lock on the Chest."}
+363 |
+364 |         return {"status": "failure", "description": f"The {item_name} has no effect on the {target_name}."}
+    |                                                                                                     ^^^^^^^ E501
+    |
+
+symbolic_agi\planner.py:31:101: E501 Line too long (121 > 100)
+   |
+29 |         self.tools = tool_plugin
+30 |
+31 |     async def _validate_and_repair_plan(self, plan: List[Dict[str, Any]], goal_description: str) -> List[Dict[str, Any]]:
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^ E501
+32 |         """
+33 |         Validates that each step in a plan has a valid action for its assigned persona.
+   |
+
+symbolic_agi\planner.py:74:101: E501 Line too long (120 > 100)
+   |
+73 |         available_capabilities_prompt = self.agent_pool.get_persona_capabilities_prompt()
+74 |         response_format = '{"thought": "...", "plan": [{"action": "...", "parameters": {}, "assigned_persona": "..."}]}'
+   |                                                                                                     ^^^^^^^^^^^^^^^^^^^^ E501
+75 |         master_prompt: str
+   |
+
+symbolic_agi\planner.py:80:101: E501 Line too long (189 > 100)
+   |
+78 | …
+79 | …
+80 | …e, `get_skill_details` returns `{"skill_details": {...}}`. This entire dictionary is added to the workspace.
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+81 | …}` or `{key.subkey}`.
+82 | …
+   |
+
+symbolic_agi\planner.py:81:101: E501 Line too long (102 > 100)
+   |
+79 | - The `orchestrator` maintains a temporary `workspace` for each goal.
+80 | - When a tool is executed, its return value is added to the workspace. For example, `get_skill_details` returns `{"skill_details": {..…
+81 | - To use data from a previous step, you MUST use placeholders in the format `{key}` or `{key.subkey}`.
+   |                                                                                                     ^^ E501
+82 | - **Example**:
+83 |   - Step 1: `get_skill_details` -> returns `{"skill_details": {"id": "123", "name": "X"}}`
+   |
+
+symbolic_agi\planner.py:95:101: E501 Line too long (168 > 100)
+   |
+94 | …
+95 | … by your QA team and rejected. Your task is to incorporate their feedback to create a better plan.
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+96 | …
+97 | …
+   |
+
+symbolic_agi\planner.py:111:101: E501 Line too long (147 > 100)
+    |
+109 | …
+110 | …vious plan was rejected.
+111 | …n from scratch that directly addresses the QA feedback and follows all data flow rules.
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+112 | …N object with your "thought" process and the new "plan". Each step in the plan MUST have an "action", "parameters", and "assigned_pe…
+113 | …
+    |
+
+symbolic_agi\planner.py:112:101: E501 Line too long (256 > 100)
+    |
+110 | …
+111 | …ses the QA feedback and follows all data flow rules.
+112 | …s and the new "plan". Each step in the plan MUST have an "action", "parameters", and "assigned_persona". Respond ONLY with the raw JSON object: {response_format}
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+113 | …
+114 | …
+    |
+
+symbolic_agi\planner.py:117:101: E501 Line too long (162 > 100)
+    |
+115 | …on}'")
+116 | …
+117 | …a goal failed. Your task is to perform a root-cause analysis and create a new, corrected plan.
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+118 | …
+119 | …
+    |
+
+symbolic_agi\planner.py:129:101: E501 Line too long (354 > 100)
+    |
+127 | …
+128 | …
+129 | …er omitted required params" means you forgot a parameter. The error "ValidationError" means you passed data in the wrong format (e.g., a string instead of a dictionary). The error "Unknown or non-awaitable action" means you invented a tool that doesn't exist.
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+130 | …eps. You must use the `{'{key.subkey}'}` syntax to reference data from the workspace.
+131 | …cause.
+    |
+
+symbolic_agi\planner.py:130:101: E501 Line too long (180 > 100)
+    |
+128 | …
+129 | …. The error "Planner omitted required params" means you forgot a parameter. The error "ValidationError" means you passed data in the…
+130 | …rrectly between steps. You must use the `{'{key.subkey}'}` syntax to reference data from the workspace.
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+131 | …at fixes the root cause.
+132 | …r "thought" process and the new "plan". Each step MUST have an "action", "parameters", and "assigned_persona". Respond ONLY with the…
+    |
+
+symbolic_agi\planner.py:131:101: E501 Line too long (101 > 100)
+    |
+129 | 1.  **Analyze the Trace**: Review the `execution_history` and `error_message`. The error "Planner omitted required params" means you …
+130 | 2.  **Identify Root Cause**: The most common error is failing to pass data correctly between steps. You must use the `{'{key.subkey}'…
+131 | 3.  **Formulate a New Strategy**: Create a new, complete plan from scratch that fixes the root cause.
+    |                                                                                                     ^ E501
+132 | 4.  **Respond**: Decompose the corrected approach into a JSON object with your "thought" process and the new "plan". Each step MUST h…
+133 | """
+    |
+
+symbolic_agi\planner.py:132:101: E501 Line too long (244 > 100)
+    |
+130 | …eps. You must use the `{'{key.subkey}'}` syntax to reference data from the workspace.
+131 | …cause.
+132 | …s and the new "plan". Each step MUST have an "action", "parameters", and "assigned_persona". Respond ONLY with the raw JSON object: {response_format}
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+133 | …
+134 | …
+    |
+
+symbolic_agi\planner.py:137:101: E501 Line too long (123 > 100)
+    |
+135 |             logging.info(f"Decomposing goal: '{goal_description}'")
+136 |             master_prompt = f"""
+137 | You are a master project manager AGI. Your task is to decompose a high-level goal into a series of concrete, logical steps.
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^ E501
+138 |
+139 | # GOAL MODE: {mode.upper()}
+    |
+
+symbolic_agi\planner.py:140:101: E501 Line too long (121 > 100)
+    |
+139 | # GOAL MODE: {mode.upper()}
+140 | {'You are in "docs" mode. You MUST NOT use the "write_code" or "execute_python_code" actions.' if mode == 'docs' else ''}
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^ E501
+141 |
+142 | # AVAILABLE CAPABILITIES & PERSONAS
+    |
+
+symbolic_agi\planner.py:146:101: E501 Line too long (171 > 100)
+    |
+144 | …
+145 | …
+146 | …ls`, `update_skill`, etc., are TOOLS. **All tools MUST be assigned to the "orchestrator" persona.**
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+147 | …de`, `interact_with_page` etc., are SKILLS. **Skills MUST be assigned to their corresponding persona (e.g., "qa", "research", "coder…
+148 | …l actions that are expanded and executed by the "orchestrator".
+    |
+
+symbolic_agi\planner.py:147:101: E501 Line too long (220 > 100)
+    |
+145 | …
+146 | …c., are TOOLS. **All tools MUST be assigned to the "orchestrator" persona.**
+147 | …e` etc., are SKILLS. **Skills MUST be assigned to their corresponding persona (e.g., "qa", "research", "coder", "browser").**
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+148 | …nded and executed by the "orchestrator".
+    |
+
+symbolic_agi\planner.py:148:101: E501 Line too long (135 > 100)
+    |
+146 | …, `get_skill_details`, `update_skill`, etc., are TOOLS. **All tools MUST be assigned to the "orchestrator" persona.**
+147 | …_topic`, `write_code`, `interact_with_page` etc., are SKILLS. **Skills MUST be assigned to their corresponding persona (e.g., "qa", …
+148 | …ion) are high-level actions that are expanded and executed by the "orchestrator".
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+149 | …
+150 | …
+    |
+
+symbolic_agi\planner.py:151:101: E501 Line too long (142 > 100)
+    |
+150 | …
+151 | …ile` (orchestrator) and then use `analyze_data` (orchestrator) on the `content` key.
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+152 | …p `propose_code_modification` (orchestrator) -> `apply_code_modification` (orchestrator) process.
+153 | …ons, energy). If frustration is high or energy is low, create simpler, lower-risk plans. If necessary, plan to ask the user for help…
+    |
+
+symbolic_agi\planner.py:152:101: E501 Line too long (155 > 100)
+    |
+150 | …
+151 | …orchestrator) and then use `analyze_data` (orchestrator) on the `content` key.
+152 | …pose_code_modification` (orchestrator) -> `apply_code_modification` (orchestrator) process.
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+153 | …nergy). If frustration is high or energy is low, create simpler, lower-risk plans. If necessary, plan to ask the user for help using…
+    |
+
+symbolic_agi\planner.py:153:101: E501 Line too long (217 > 100)
+    |
+151 | …lyze_data` (orchestrator) on the `content` key.
+152 | …trator) -> `apply_code_modification` (orchestrator) process.
+153 | …or energy is low, create simpler, lower-risk plans. If necessary, plan to ask the user for help using `respond_to_user`.**
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+154 | …
+155 | …
+    |
+
+symbolic_agi\planner.py:159:101: E501 Line too long (250 > 100)
+    |
+157 | …
+158 | …
+159 | …T include an "action", "parameters", and "assigned_persona" according to the assignment rules above. Use the `{'{key}'}` syntax to pass data between steps.
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+160 | …
+161 | …
+    |
+
+symbolic_agi\planner.py:169:101: E501 Line too long (112 > 100)
+    |
+167 |                     plan_str = await self.introspector.llm_reflect(master_prompt)
+168 |                 else:
+169 |                     logging.warning(f"Malformed JSON response detected. Attempting repair on: {plan_str[:200]}")
+    |                                                                                                     ^^^^^^^^^^^^ E501
+170 |                     forceful_prompt = f"""
+171 | The following text is NOT valid JSON.
+    |
+
+symbolic_agi\planner.py:189:101: E501 Line too long (118 > 100)
+    |
+187 |                     continue
+188 |                 else:
+189 |                     logging.error(f"Final repair attempt failed to produce valid JSON: {e}. Response was: {plan_str}")
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^ E501
+190 |                     return PlannerOutput(thought="Failed to generate a valid plan.", plan=[])
+    |
+
+symbolic_agi\planner.py:206:101: E501 Line too long (196 > 100)
+    |
+204 | …
+205 | …
+206 | …valid action/persona assignments. Please regenerate the plan adhering strictly to the available capabilities."}
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+207 | …
+208 | …
+    |
+
+symbolic_agi\prompts.py:130:101: E501 Line too long (105 > 100)
+    |
+128 | you should add to it or modify it as requested.
+129 | Your final output for this step MUST be a single, valid JSON object with two keys:
+130 | - "generated_code": A string containing ONLY the new or modified code block you just wrote for THIS step.
+    |                                                                                                     ^^^^^ E501
+131 | - "state_updates": A dictionary for what you need to remember. You MUST include a "previous_code" key here containing the ENTIRE, CUM…
+    |
+
+symbolic_agi\prompts.py:131:101: E501 Line too long (181 > 100)
+    |
+129 | …keys:
+130 | …ou just wrote for THIS step.
+131 | …de a "previous_code" key here containing the ENTIRE, CUMULATIVE code as it should exist after this step.
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ E501
+132 | …
+133 | …
+    |
+
+symbolic_agi\recursive_introspector.py:409:75: W292 [*] No newline at end of file
+    |
+407 |             return super().default(o)
+408 |         except TypeError:
+409 |             return f"[Unserializable: {type(o).__name__}]"  # type: ignore
+    |                                                                           ^ W292
+    |
+    = help: Add trailing newline
+
+symbolic_agi\run_agi.py:1:4: SyntaxError: Expected an expression
+  |
+1 | ---
+  |    ^
+2 |
+3 | #### `symbolic_agi/run_agi.py`
+  |
+
+symbolic_agi\run_agi.py:5:1: SyntaxError: Got unexpected token `
+  |
+3 | #### `symbolic_agi/run_agi.py`
+4 |
+5 | ```python
+  | ^
+6 | # symbolic_agi/run_agi.py
+  |
+
+symbolic_agi\run_agi.py:5:2: SyntaxError: Got unexpected token `
+  |
+3 | #### `symbolic_agi/run_agi.py`
+4 |
+5 | ```python
+  |  ^
+6 | # symbolic_agi/run_agi.py
+  |
+
+symbolic_agi\run_agi.py:5:3: SyntaxError: Got unexpected token `
+  |
+3 | #### `symbolic_agi/run_agi.py`
+4 |
+5 | ```python
+  |   ^
+6 | # symbolic_agi/run_agi.py
+  |
+
+symbolic_agi\skill_manager.py:405:10: W292 [*] No newline at end of file
+    |
+403 |                 'assigned_persona: "orchestrator"'
+404 |             ),
+405 |         }
+    |          ^ W292
+    |
+    = help: Add trailing newline
+
+Found 92 errors.
+[*] 8 fixable with the `--fix` option.
