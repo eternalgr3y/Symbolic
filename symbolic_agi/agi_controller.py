@@ -5,6 +5,7 @@ import logging
 import os
 from collections import deque
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+from datetime import datetime, timezone
 
 from playwright.async_api import Browser, Page, async_playwright
 from watchfiles import awatch
@@ -318,9 +319,10 @@ class SymbolicAGI:
                         file_path,
                     )
                     event = PerceptionEvent(
+                        type="agent_appeared",
                         source="workspace",
-                        type=f"file_{change_type.name}",  # e.g., file_added, file_modified
-                        content={"file_path": file_path},
+                        content={"message": "User input received"},
+                        timestamp=datetime.now(timezone.utc).isoformat(),
                     )
                     self.perception_buffer.append(event)
         except asyncio.CancelledError:

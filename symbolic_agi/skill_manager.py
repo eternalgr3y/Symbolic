@@ -15,7 +15,9 @@ if TYPE_CHECKING:
 _innate_action_registry: List[ActionDefinition] = []
 
 
-def register_innate_action(persona: str, description: str):
+def register_innate_action(
+    persona: str, description: str
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """A decorator to register a tool or skill as an innate action."""
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:

@@ -19,8 +19,8 @@ from .schemas import AGIConfig, GoalMode, GoalModel
 SHUTDOWN_EVENT = asyncio.Event()
 
 
-def setup_logging() -> None:
-    """Sets up a detailed, colorized logger with file rotation."""
+def setup_logging(log_level: str = "INFO") -> None:
+    """Sets up logging configuration."""
     log_file = "agi.log"
     max_bytes = 10 * 1024 * 1024
     backup_count = 5
@@ -126,7 +126,7 @@ async def main() -> None:  # noqa: C901
             except (EOFError, asyncio.CancelledError):
                 break
 
-    def shutdown_handler(signum=None, frame=None) -> None:
+    def shutdown_handler(signum: Optional[int] = None, frame: Optional[object] = None) -> None:
         """Initiates a graceful shutdown."""
         if SHUTDOWN_EVENT.is_set():
             return

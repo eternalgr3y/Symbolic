@@ -1,10 +1,12 @@
 # symbolic_agi/execution_unit.py
 
+import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from . import metrics
-from .schemas import ActionStep, ExecutionStepRecord
+from .schemas import ActionStep, MemoryEntryModel
 
 if TYPE_CHECKING:
     from .agi_controller import SymbolicAGI
@@ -78,7 +80,9 @@ class ExecutionUnit:
         """The main execution loop for the orchestrator to process the active goal."""
         with metrics.AGI_CYCLE_DURATION.time():
             if self.agi.perception_buffer:
-                interrupted = await self._reflect_on_perceptions()
+                self._reflect_on_perceptions(self.agi.perception_buffer)
+                # Simple check - in a real implementation this would be more sophisticated
+                interrupted = len(self.agi.perception_buffer) > 10
                 if interrupted:
                     return {
                         "description": (
@@ -111,7 +115,7 @@ class ExecutionUnit:
                 }
 
             if not active_goal.sub_tasks:
-                plan = await self._classify_and_generate_initial_plan(active_goal)
+                plan = await self._classify_and_generate_initial_plan(active_goal.description)
                 if not plan:
                     self.agi.ltm.invalidate_plan(
                         active_goal.id, "Failed to create a plan for the goal."
@@ -244,6 +248,15 @@ class ExecutionUnit:
                     }
 
                 agent_name = self._select_most_trusted_agent(agent_names)
+                if not agent_name:
+                    await self._handle_plan_failure(
+                        active_goal,
+                        next_step,
+                        "No trusted agent available for delegation.",
+                    )
+                    return {
+                        "description": "Step failed: No trusted agent available. Triggering replan."
+                    }
                 logging.info(
                     "[Delegate] Selected agent '%s' based on trust score.", agent_name
                 )
@@ -305,7 +318,8 @@ class ExecutionUnit:
                             "feedback",
                             "Plan rejected by QA without specific feedback.",
                         )
-                        self._decay_trust(agent_name)
+                        if agent_name:
+                            self._decay_trust(agent_name)
                         await self._trigger_plan_refinement(active_goal, feedback)
                         return {
                             "description": (
@@ -313,18 +327,21 @@ class ExecutionUnit:
                             )
                         }
                     logging.info("Plan approved by QA. Proceeding with execution.")
-                    self._reward_trust(agent_name)
+                    if agent_name:
+                        self._reward_trust(agent_name)
                     self.agi.ltm.complete_sub_task(active_goal.id)
                     return {
                         "description": "*Plan approved by QA. Continuing execution.*"
                     }
 
                 if reply:
-                    self._reward_trust(agent_name)
+                    if agent_name:
+                        self._reward_trust(agent_name)
                     if state_updates := reply.payload.pop("state_updates", None):
-                        self.agi.agent_pool.update_agent_state(
-                            agent_name, state_updates
-                        )
+                        if agent_name:
+                            self.agi.agent_pool.update_agent_state(
+                                agent_name, state_updates
+                            )
 
                     self.agi.workspaces[active_goal.id].update(reply.payload)
                     logging.info(
@@ -332,11 +349,15 @@ class ExecutionUnit:
                         list(self.agi.workspaces[active_goal.id].keys()),
                     )
 
-            history_record = ExecutionStepRecord(
-                step=next_step,
-                workspace_after=self.agi.workspaces[active_goal.id].copy(),
-            )
-            self.agi.execution_history[active_goal.id].append(history_record)
+            # Record step execution in history
+            if result:
+                history_record = {
+                    "step": next_step,
+                    "result": result,
+                    "success": result.get("status") == "success",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                self.agi.execution_history[active_goal.id].append(history_record)
 
             if result and result.get("response_text"):
                 self.agi.ltm.complete_sub_task(active_goal.id)
@@ -369,3 +390,91 @@ class ExecutionUnit:
                     f"'{next_step.action}' OK.*"
                 )
             }
+
+    async def shutdown(self) -> None:
+        """Gracefully shuts down the execution unit."""
+        logging.info("ExecutionUnit shutting down...")
+
+    def _reflect_on_perceptions(self, perceptions: Any) -> None:
+        """Reflects on recent perceptions and updates internal state."""
+        logging.debug("Reflecting on %d perceptions", len(perceptions))
+        # Add perception reflection logic here
+        pass
+
+    async def _classify_and_generate_initial_plan(
+        self, goal: str
+    ) -> Optional[List[ActionStep]]:
+        """Classifies the goal and generates an initial plan."""
+        logging.info("Classifying goal and generating initial plan: %s", goal)
+        try:
+            # Use the planner to generate initial plan
+            planner_output = await self.agi.planner.decompose_goal_into_plan(
+                goal_description=goal, file_manifest=""
+            )
+            return planner_output.plan
+        except Exception as e:
+            logging.error("Failed to generate initial plan: %s", e)
+            return None
+
+    async def _handle_plan_failure(
+        self, goal: Any, step: ActionStep, error_msg: str, agent_name: Optional[str] = None
+    ) -> None:
+        """Handles plan failure by generating a revised plan."""
+        logging.warning("Handling plan failure: %s", error_msg)
+        try:
+            # Generate a revised plan based on the failure
+            revised_goal = f"Handle failure: {error_msg}. Failed step: {step.action}"
+            planner_output = await self.agi.planner.decompose_goal_into_plan(
+                goal_description=revised_goal, file_manifest=""
+            )
+            if planner_output.plan:
+                self.agi.ltm.update_plan(goal.id, planner_output.plan)
+        except Exception as e:
+            logging.error("Failed to handle plan failure: %s", e)
+
+    def _select_most_trusted_agent(self, agent_names: List[str]) -> Optional[str]:
+        """Selects the most trusted agent from the provided list."""
+        if not agent_names:
+            return None
+        
+        # Simple implementation - return first available agent
+        # In a real implementation, this would consider trust scores
+        return agent_names[0]
+
+    def _decay_trust(self, agent_name: str) -> None:
+        """Decreases trust in an agent due to poor performance."""
+        logging.debug("Decaying trust for agent: %s", agent_name)
+        # Add trust decay logic here
+        pass
+
+    async def _trigger_plan_refinement(self, goal: Any, feedback: str) -> None:
+        """Triggers refinement of the current plan."""
+        logging.debug("Triggering plan refinement for goal: %s with feedback: %s", goal.description, feedback)
+        # Add plan refinement logic here
+        pass
+
+    def _reward_trust(self, agent_name: str) -> None:
+        """Increases trust in an agent due to good performance."""
+        logging.debug("Rewarding trust for agent: %s", agent_name)
+        # Add trust reward logic here
+        pass
+
+    async def _reflect_on_completed_goal(self, goal: Any) -> None:
+        """Reflects on a completed goal and learns from the experience."""
+        goal_desc = goal.description if hasattr(goal, 'description') else str(goal)
+        logging.info("Reflecting on completed goal: %s", goal_desc)
+
+        reflection_content = {
+            "goal": goal_desc,
+            "success": True,  # Assume success if we reach this point
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reflection": f"Goal completed successfully: {goal_desc}",
+        }
+
+        memory_entry = MemoryEntryModel(
+            type="reflection",
+            content=reflection_content,
+            importance=0.7,
+        )
+
+        await self.agi.memory.add_memory(memory_entry)

@@ -43,7 +43,7 @@ def _execute_sandboxed_code(code: str, result_queue: "Queue[Dict[str, Any]]") ->
     output_buffer = io.StringIO()
     try:
         # A very restrictive sandbox
-        safe_globals = {"__builtins__": {}}
+        safe_globals: Dict[str, Any] = {"__builtins__": {}}
         with redirect_stdout(output_buffer):
             exec(code, safe_globals, {})
         result = {"status": "success", "output": output_buffer.getvalue()}
@@ -195,7 +195,7 @@ class ToolPlugin:
 
         skill_details_result = await self.get_skill_details(skill_name)
         if skill_details_result["status"] != "success":
-            return skill_details_result
+            return cast(Dict[str, Any], skill_details_result)
 
         skill_data = skill_details_result["skill_details"]
 
@@ -521,7 +521,7 @@ Respond with ONLY the generated explanation text.
         )
         read_result = await self.read_own_source_code(file_name=file_path)
         if read_result.get("status") != "success":
-            return read_result
+            return cast(Dict[str, Any], read_result)
 
         raw_current_code = read_result.get("content", "").split(":\n\n", 1)[-1]
         prompt = f"""
@@ -531,396 +531,451 @@ Your task is to rewrite the entire file with the requested change applied.
 --- CURRENT CODE of '{file_path}' ---
 ```python
 {raw_current_code}
+```
 
---- REQUESTED CHANGE --- {change_description} --- INSTRUCTIONS --- Rewrite the ENTIRE file from top to bottom, incorporating the change. Do NOT add any commentary, explanations, or markdown formatting. Your response must be ONLY the raw, complete Python code for the new file. Respond with ONLY the raw Python code. """ try: resp = await monitored_chat_completion( role="planner", messages=[{"role": "system", "content": prompt}], temperature=0.0, ) if resp.choices and resp.choices[0].message.content: proposed_code = resp.choices[0].message.content.strip() if proposed_code.startswith("python"):                     proposed_code = (                         proposed_code.split("python", 1)[-1] .rsplit("", 1)[0]                         .strip()                     )                 elif proposed_code.startswith(""): proposed_code = ( proposed_code.split("", 1)[-1].rsplit("", 1)[0].strip() ) return {"status": "success", "proposed_code": proposed_code} return { "status": "failure", "error": "LLM returned no code for modification.", } except Exception as e: return { "status": "failure", "error": f"Error during code modification proposal: {e}", }
+--- REQUESTED CHANGE ---
+{change_description}
 
-@register_innate_action("orchestrator", "Creates a new specialist agent.")
-async def provision_agent(
-    self, persona: str, name: str, **kwargs: Any
-) -> Dict[str, Any]:
-    logging.critical(
-        "Orchestrator provisioning new agent: Name='%s', Persona='%s'",
-        name,
-        persona,
-    )
-    try:
-        from .agent import Agent
+--- INSTRUCTIONS ---
+Rewrite the ENTIRE file from top to bottom, incorporating the change. Do NOT add any commentary, explanations, or markdown formatting. Your response must be ONLY the raw, complete Python code for the new file.
 
-        self.agi.agent_pool.add_agent(
-            name=name, persona=persona, memory=self.agi.memory
-        )
-        new_agent_instance = Agent(
-            name=name, message_bus=self.agi.message_bus, api_client=client
-        )
-        task = asyncio.create_task(new_agent_instance.run())
-        self.agi.agent_tasks.append(task)
-        return {
-            "status": "success",
-            "description": f"Agent '{name}' with persona '{persona}' has been provisioned.",
-        }
-    except Exception as e:
-        error_msg = f"Failed to provision agent '{name}': {e}"
-        logging.error(error_msg, exc_info=True)
-        return {"status": "failure", "description": error_msg}
-
-def _get_safe_path(self, file_path: str, base_dir: str) -> str:
-    base_path = os.path.abspath(base_dir)
-    safe_filename = os.path.basename(file_path)
-    target_path = os.path.abspath(os.path.join(base_path, safe_filename))
-    if os.path.commonpath([base_path]) != os.path.commonpath(
-        [base_path, target_path]
-    ):
-        raise PermissionError(
-            f"File access denied: path is outside the designated directory '{base_dir}'."
-        )
-    return target_path
-
-@register_innate_action("orchestrator", "Answers a query based on provided data.")
-async def analyze_data(
-    self, data: str, query: str, **kwargs: Any
-) -> Dict[str, Any]:
-    logging.info("Analyzing data with query: '%s'", query)
-    workspace: Dict[str, Any] = kwargs.get("workspace", {})
-    if data in workspace:
-        logging.info("Resolving 'data' parameter from workspace key '%s'...", data)
-        data = str(workspace[data])
-    prompt = f"""
-
-You are a data analysis expert. Your task is to answer a specific query based ONLY on the provided data. Do not use any external knowledge. If the answer cannot be found in the data, state that clearly. --- DATA --- {data} --- QUERY --- {query} Respond with ONLY the direct answer to the query. """ try: resp = await monitored_chat_completion( role="tool_action", messages=[{"role": "system", "content": prompt}] ) if resp.choices and resp.choices[0].message.content: answer = resp.choices[0].message.content.strip() return {"status": "success", "answer": answer} return {"status": "failure", "error": "No answer returned from LLM."} except Exception as e: return {"status": "failure", "error": str(e)}
-
-@register_innate_action(
-    "orchestrator", "Executes a sandboxed block of Python code."
-)
-async def execute_python_code(
-    self, code: Optional[str] = None, timeout_seconds: int = 30, **kwargs: Any
-) -> Dict[str, Any]:
-    """
-    Executes Python code in a separate, sandboxed process with a timeout.
-    This is a high-security measure to prevent the AGI from affecting its own
-    runtime or accessing unauthorized resources.
-    """
-    if code is None:
-        return {
-            "status": "failure",
-            "description": "execute_python_code was called without code.",
-        }
-    logging.warning("Executing sandboxed Python code:\n---\n%s\n---", code)
-
-    loop = asyncio.get_running_loop()
-    result_queue: "Queue[Dict[str, Any]]" = Queue()
-
-    try:
-        # Schedule the sandboxed execution in a separate process
-        future = loop.run_in_executor(
-            self.process_pool, _execute_sandboxed_code, code, result_queue
-        )
-        # Wait for the result with a timeout
-        await asyncio.wait_for(future, timeout=timeout_seconds)
-        result = result_queue.get()
-
-        if result["status"] == "success":
-            logging.info("Code execution successful. Output:\n%s", result["output"])
-        else:
-            logging.error("Code execution failed. Error: %s", result.get("error"))
-
-        return result
-
-    except asyncio.TimeoutError:
-        logging.error("Code execution timed out after %d seconds.", timeout_seconds)
-        # It's difficult to forcefully kill the process in the pool,
-        # but the result from that process will be ignored.
-        return {
-            "status": "failure",
-            "description": "Error: Code execution took too long and was terminated.",
-        }
-    except Exception as e:
-        error_message = (
-            f"An error occurred during code execution management: {type(e).__name__}: {e}"
-        )
-        logging.error(error_message, exc_info=True)
-        return {"status": "failure", "description": error_message}
-
-@register_innate_action(
-    "orchestrator", "Reads the content of one of the AGI's own source code files."
-)
-async def read_own_source_code(
-    self, file_name: str, **kwargs: Any
-) -> Dict[str, Any]:
-    source_dir = os.path.join(PROJECT_ROOT, "symbolic_agi")
-    if not file_name:
-        logging.info("Listing source code files.")
+Respond with ONLY the raw Python code.
+"""
         try:
-            files = [f for f in os.listdir(source_dir) if f.endswith(".py")]
-            return {"status": "success", "files": files}
+            resp = await monitored_chat_completion(
+                role="planner",
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.0,
+            )
+            if resp.choices and resp.choices[0].message.content:
+                proposed_code = resp.choices[0].message.content.strip()
+                if proposed_code.startswith("```python"):
+                    proposed_code = (
+                        proposed_code.split("```python", 1)[-1]
+                        .rsplit("```", 1)[0]
+                        .strip()
+                    )
+                elif proposed_code.startswith("```"):
+                    proposed_code = (
+                        proposed_code.split("```", 1)[-1].rsplit("```", 1)[0].strip()
+                    )
+                return {"status": "success", "proposed_code": proposed_code}
+            return {
+                "status": "failure",
+                "error": "LLM returned no code for modification.",
+            }
         except Exception as e:
             return {
                 "status": "failure",
-                "description": f"An error occurred while listing source files: {e}",
+                "error": f"Error during code modification proposal: {e}",
             }
-    logging.info(
-        "Performing self-reflection by reading source code: %s", file_name
-    )
-    try:
-        safe_file_path = self._get_safe_path(file_name, source_dir)
-        with open(safe_file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return {
-            "status": "success",
-            "content": f"Source code for '{file_name}':\n\n{content}",
-        }
-    except PermissionError as e:
-        return {"status": "failure", "description": str(e)}
-    except FileNotFoundError:
-        return {
-            "status": "failure",
-            "description": f"Source file '{file_name}' not found.",
-        }
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred while reading source file: {e}",
-        }
 
-@register_innate_action(
-    "orchestrator", "Reads a core AGI data file (e.g., profiles, skills)."
-)
-async def read_core_file(self, file_name: str, **kwargs: Any) -> Dict[str, Any]:
-    logging.info("Attempting to read core AGI file: %s", file_name)
-    allowed_files = [
-        "consciousness_profile.json",
-        "identity_profile.json",
-        "long_term_goals.json",
-        "learned_skills.json",
-        "reasoning_mutations.json",
-    ]
-    if file_name not in allowed_files:
-        return {
-            "status": "failure",
-            "description": f"Permission denied: '{file_name}' is not a readable core file.",
-        }
-    try:
-        safe_file_path = self._get_safe_path(file_name, config.DATA_DIR)
-        with open(safe_file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return {"status": "success", "content": content}
-    except PermissionError as e:
-        return {"status": "failure", "description": str(e)}
-    except FileNotFoundError:
-        return {
-            "status": "failure",
-            "description": (
-                f"Core file '{file_name}' not found. Use 'list_files' on workspace."
-            ),
-        }
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred while reading core file: {e}",
-        }
+    @register_innate_action("orchestrator", "Creates a new specialist agent.")
+    async def provision_agent(
+        self, persona: str, name: str, **kwargs: Any
+    ) -> Dict[str, Any]:
+        logging.critical(
+            "Orchestrator provisioning new agent: Name='%s', Persona='%s'",
+            name,
+            persona,
+        )
+        try:
+            from .agent import Agent
 
-@register_innate_action(
-    "orchestrator", "Lists files in a directory within the workspace."
-)
-async def list_files(self, directory: str = ".", **kwargs: Any) -> Dict[str, Any]:
-    try:
-        base_path = self.workspace_dir
-        target_path = os.path.abspath(os.path.join(base_path, directory))
+            self.agi.agent_pool.add_agent(
+                name=name, persona=persona, memory=self.agi.memory
+            )
+            new_agent_instance = Agent(
+                name=name, message_bus=self.agi.message_bus, api_client=client
+            )
+            task = asyncio.create_task(new_agent_instance.run())
+            self.agi.agent_tasks.append(task)
+            return {
+                "status": "success",
+                "description": f"Agent '{name}' with persona '{persona}' has been provisioned.",
+            }
+        except Exception as e:
+            error_msg = f"Failed to provision agent '{name}': {e}"
+            logging.error(error_msg, exc_info=True)
+            return {"status": "failure", "description": error_msg}
+
+    def _get_safe_path(self, file_path: str, base_dir: str) -> str:
+        base_path = os.path.abspath(base_dir)
+        safe_filename = os.path.basename(file_path)
+        target_path = os.path.abspath(os.path.join(base_path, safe_filename))
         if os.path.commonpath([base_path]) != os.path.commonpath(
             [base_path, target_path]
         ):
             raise PermissionError(
-                "File access denied: path is outside the workspace directory."
+                f"File access denied: path is outside the designated directory '{base_dir}'."
             )
-        files = os.listdir(target_path)
-        return {"status": "success", "files": files}
-    except Exception as e:
-        return {"status": "failure", "description": f"An error occurred: {e}"}
+        return target_path
 
-@register_innate_action(
-    "orchestrator", "Writes content to a file in the workspace."
-)
-async def write_file(
-    self, file_path: str, content: Optional[str] = None, **kwargs: Any
-) -> Dict[str, Any]:
-    try:
+    @register_innate_action("orchestrator", "Answers a query based on provided data.")
+    async def analyze_data(
+        self, data: str, query: str, **kwargs: Any
+    ) -> Dict[str, Any]:
+        logging.info("Analyzing data with query: '%s'", query)
         workspace: Dict[str, Any] = kwargs.get("workspace", {})
-        if isinstance(content, str) and content in workspace:
-            content = str(workspace[content])
-            logging.info(
-                "Resolved 'content' parameter from workspace key '%s...'",
-                content[:20],
+        if data in workspace:
+            logging.info("Resolving 'data' parameter from workspace key '%s'...", data)
+            data = str(workspace[data])
+        prompt = f"""
+You are a data analysis expert. Your task is to answer a specific query based ONLY on the provided data. Do not use any external knowledge. If the answer cannot be found in the data, state that clearly.
+
+--- DATA ---
+{data}
+
+--- QUERY ---
+{query}
+
+Respond with ONLY the direct answer to the query.
+"""
+        try:
+            resp = await monitored_chat_completion(
+                role="tool_action",
+                messages=[{"role": "system", "content": prompt}]
             )
-        if content is None:
+            if resp.choices and resp.choices[0].message.content:
+                answer = resp.choices[0].message.content.strip()
+                return {"status": "success", "answer": answer}
+            return {"status": "failure", "error": "No answer returned from LLM."}
+        except Exception as e:
+            return {"status": "failure", "error": str(e)}
+
+    @register_innate_action(
+        "orchestrator", "Executes a sandboxed block of Python code."
+    )
+    async def execute_python_code(
+        self, code: Optional[str] = None, timeout_seconds: int = 30, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """
+        Executes Python code in a separate, sandboxed process with a timeout.
+        This is a high-security measure to prevent the AGI from affecting its own
+        runtime or accessing unauthorized resources.
+        """
+        if code is None:
+            return {
+                "status": "failure",
+                "description": "execute_python_code was called without code.",
+            }
+        logging.warning("Executing sandboxed Python code:\n---\n%s\n---", code)
+
+        loop = asyncio.get_running_loop()
+        result_queue: "Queue[Dict[str, Any]]" = Queue()
+
+        try:
+            # Schedule the sandboxed execution in a separate process
+            future = loop.run_in_executor(
+                self.process_pool, _execute_sandboxed_code, code, result_queue
+            )
+            # Wait for the result with a timeout
+            await asyncio.wait_for(future, timeout=timeout_seconds)
+            result = result_queue.get()
+
+            if result["status"] == "success":
+                logging.info("Code execution successful. Output:\n%s", result["output"])
+            else:
+                logging.error("Code execution failed. Error: %s", result.get("error"))
+
+            return result
+
+        except asyncio.TimeoutError:
+            logging.error("Code execution timed out after %d seconds.", timeout_seconds)
+            # It's difficult to forcefully kill the process in the pool,
+            # but the result from that process will be ignored.
+            return {
+                "status": "failure",
+                "description": "Error: Code execution took too long and was terminated.",
+            }
+        except Exception as e:
+            error_message = (
+                f"An error occurred during code execution management: {type(e).__name__}: {e}"
+            )
+            logging.error(error_message, exc_info=True)
+            return {"status": "failure", "description": error_message}
+
+    @register_innate_action(
+        "orchestrator", "Reads the content of one of the AGI's own source code files."
+    )
+    async def read_own_source_code(
+        self, file_name: str, **kwargs: Any
+    ) -> Dict[str, Any]:
+        source_dir = os.path.join(PROJECT_ROOT, "symbolic_agi")
+        if not file_name:
+            logging.info("Listing source code files.")
+            try:
+                files = [f for f in os.listdir(source_dir) if f.endswith(".py")]
+                return {"status": "success", "files": files}
+            except Exception as e:
+                return {
+                    "status": "failure",
+                    "description": f"An error occurred while listing source files: {e}",
+                }
+        logging.info(
+            "Performing self-reflection by reading source code: %s", file_name
+        )
+        try:
+            safe_file_path = self._get_safe_path(file_name, source_dir)
+            with open(safe_file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {
+                "status": "success",
+                "content": f"Source code for '{file_name}':\n\n{content}",
+            }
+        except PermissionError as e:
+            return {"status": "failure", "description": str(e)}
+        except FileNotFoundError:
+            return {
+                "status": "failure",
+                "description": f"Source file '{file_name}' not found.",
+            }
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred while reading source file: {e}",
+            }
+
+    @register_innate_action(
+        "orchestrator", "Reads a core AGI data file (e.g., profiles, skills)."
+    )
+    async def read_core_file(self, file_name: str, **kwargs: Any) -> Dict[str, Any]:
+        logging.info("Attempting to read core AGI file: %s", file_name)
+        allowed_files = [
+            "consciousness_profile.json",
+            "identity_profile.json",
+            "long_term_goals.json",
+            "learned_skills.json",
+            "reasoning_mutations.json",
+        ]
+        if file_name not in allowed_files:
+            return {
+                "status": "failure",
+                "description": f"Permission denied: '{file_name}' is not a readable core file.",
+            }
+        try:
+            safe_file_path = self._get_safe_path(file_name, config.DATA_DIR)
+            with open(safe_file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"status": "success", "content": content}
+        except PermissionError as e:
+            return {"status": "failure", "description": str(e)}
+        except FileNotFoundError:
             return {
                 "status": "failure",
                 "description": (
-                    "write_file was called without content in parameters or workspace."
+                    f"Core file '{file_name}' not found. Use 'list_files' on workspace."
                 ),
             }
-        safe_file_path = self._get_safe_path(file_path, self.workspace_dir)
-        with open(safe_file_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return {
-            "status": "success",
-            "description": f"Successfully wrote to '{file_path}'.",
-        }
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred while writing file: {e}",
-        }
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred while reading core file: {e}",
+            }
 
-@register_innate_action(
-    "orchestrator", "Reads the content of a file from the workspace."
-)
-async def read_file(self, file_path: str, **kwargs: Any) -> Dict[str, Any]:
-    try:
-        safe_file_path = self._get_safe_path(file_path, self.workspace_dir)
-        with open(safe_file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return {"status": "success", "content": content}
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred while reading file: {e}",
-        }
+    @register_innate_action(
+        "orchestrator", "Lists files in a directory within the workspace."
+    )
+    async def list_files(self, directory: str = ".", **kwargs: Any) -> Dict[str, Any]:
+        try:
+            base_path = self.workspace_dir
+            target_path = os.path.abspath(os.path.join(base_path, directory))
+            if os.path.commonpath([base_path]) != os.path.commonpath(
+                [base_path, target_path]
+            ):
+                raise PermissionError(
+                    "File access denied: path is outside the workspace directory."
+                )
+            files = os.listdir(target_path)
+            return {"status": "success", "files": files}
+        except Exception as e:
+            return {"status": "failure", "description": f"An error occurred: {e}"}
 
-@register_innate_action(
-    "orchestrator", "Analyzes an image from a URL and returns a description."
-)
-async def analyze_image(
-    self,
-    image_url: str,
-    prompt: str = "Describe this image in detail.",
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    logging.info("Analyzing image from URL: %s", image_url)
-    if not self._is_url_allowed(image_url):
-        return {
-            "status": "failure",
-            "description": f"Access to URL '{image_url}' is blocked by the security policy.",
-        }
-    try:
-        response = await monitored_chat_completion(
-            role="tool_action",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
+    @register_innate_action(
+        "orchestrator", "Writes content to a file in the workspace."
+    )
+    async def write_file(
+        self, file_path: str, content: Optional[str] = None, **kwargs: Any
+    ) -> Dict[str, Any]:
+        try:
+            workspace: Dict[str, Any] = kwargs.get("workspace", {})
+            if isinstance(content, str) and content in workspace:
+                content = str(workspace[content])
+                logging.info(
+                    "Resolved 'content' parameter from workspace key '%s...'",
+                    content[:20],
+                )
+            if content is None:
+                return {
+                    "status": "failure",
+                    "description": (
+                        "write_file was called without content in parameters or workspace."
+                    ),
                 }
-            ],
-            max_tokens=500,
-            timeout=45.0,
-        )
-        if response.choices and response.choices[0].message.content:
+            safe_file_path = self._get_safe_path(file_path, self.workspace_dir)
+            with open(safe_file_path, "w", encoding="utf-8") as f:
+                f.write(content)
             return {
                 "status": "success",
-                "description": response.choices[0].message.content,
+                "description": f"Successfully wrote to '{file_path}'.",
             }
-        return {
-            "status": "failure",
-            "description": "Image analysis returned no content.",
-        }
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred during image analysis: {e}",
-        }
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred while writing file: {e}",
+            }
 
-@register_innate_action(
-    "orchestrator", "Fetches and returns the text content of a webpage."
-)
-async def browse_webpage(self, url: str, **kwargs: Any) -> Dict[str, Any]:
-    logging.info("Browse webpage: %s", url)
-    if not self._is_url_allowed(url):
-        return {
-            "status": "failure",
-            "description": f"Access to URL '{url}' is blocked by the security policy.",
-        }
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/91.0.4472.124 Safari/537.36"
+    @register_innate_action(
+        "orchestrator", "Reads the content of a file from the workspace."
+    )
+    async def read_file(self, file_path: str, **kwargs: Any) -> Dict[str, Any]:
+        try:
+            safe_file_path = self._get_safe_path(file_path, self.workspace_dir)
+            with open(safe_file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"status": "success", "content": content}
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred while reading file: {e}",
+            }
+
+    @register_innate_action(
+        "orchestrator", "Analyzes an image from a URL and returns a description."
+    )
+    async def analyze_image(
+        self,
+        image_url: str,
+        prompt: str = "Describe this image in detail.",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        logging.info("Analyzing image from URL: %s", image_url)
+        if not self._is_url_allowed(image_url):
+            return {
+                "status": "failure",
+                "description": f"Access to URL '{image_url}' is blocked by the security policy.",
+            }
+        try:
+            response = await monitored_chat_completion(
+                role="tool_action",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    }
+                ],
+                max_tokens=500,
+                timeout=45.0,
             )
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        for script_or_style in soup(["script", "style"]):
-            script_or_style.decompose()
-        text_chunks = (
-            phrase.strip()
-            for line in soup.get_text().splitlines()
-            for phrase in line.split("  ")
-        )
-        text = "\n".join(chunk for chunk in text_chunks if chunk)
-        return (
-            {"status": "success", "content": text[:8000]}
-            if text
-            else {"status": "failure", "description": "Could not extract text."}
-        )
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred while Browse webpage: {e}",
-        }
+            if response.choices and response.choices[0].message.content:
+                return {
+                    "status": "success",
+                    "description": response.choices[0].message.content,
+                }
+            return {
+                "status": "failure",
+                "description": "Image analysis returned no content.",
+            }
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred during image analysis: {e}",
+            }
 
-@register_innate_action(
-    "orchestrator", "Performs a web search and returns the results."
-)
-async def web_search(
-    self, query: str, num_results: int = 3, **kwargs: Any
-) -> Dict[str, Any]:
-    logging.info("Executing REAL web search for query: '%s'", query)
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=num_results))
-
-        allowed_results = [
-            res for res in results if self._is_url_allowed(res["href"])
-        ]
-        if len(allowed_results) < len(results):
-            filtered_count = len(results) - len(allowed_results)
-            logging.warning(
-                "Filtered out %d search results due to security policy.",
-                filtered_count,
+    @register_innate_action(
+        "orchestrator", "Fetches and returns the text content of a webpage."
+    )
+    async def browse_webpage(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+        logging.info("Browse webpage: %s", url)
+        if not self._is_url_allowed(url):
+            return {
+                "status": "failure",
+                "description": f"Access to URL '{url}' is blocked by the security policy.",
+            }
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/91.0.4472.124 Safari/537.36"
+                )
+            }
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            for script_or_style in soup(["script", "style"]):
+                script_or_style.decompose()
+            text_chunks = (
+                phrase.strip()
+                for line in soup.get_text().splitlines()
+                for phrase in line.split("  ")
             )
+            text = "\n".join(chunk for chunk in text_chunks if chunk)
+            return (
+                {"status": "success", "content": text[:8000]}
+                if text
+                else {"status": "failure", "description": "Could not extract text."}
+            )
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred while Browse webpage: {e}",
+            }
 
-        if not allowed_results:
+    @register_innate_action(
+        "orchestrator", "Performs a web search and returns the results."
+    )
+    async def web_search(
+        self, query: str, num_results: int = 3, **kwargs: Any
+    ) -> Dict[str, Any]:
+        logging.info("Executing REAL web search for query: '%s'", query)
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=num_results))
+
+            allowed_results = [
+                res for res in results if self._is_url_allowed(res["href"])
+            ]
+            if len(allowed_results) < len(results):
+                filtered_count = len(results) - len(allowed_results)
+                logging.warning(
+                    "Filtered out %d search results due to security policy.",
+                    filtered_count,
+                )
+
+            if not allowed_results:
+                return {
+                    "status": "success",
+                    "data": "No results found from allowed domains.",
+                }
+
+            search_summary = "\n\n".join(
+                f"Title: {res['title']}\nSnippet: {res['body']}\nURL: {res['href']}"
+                for res in allowed_results
+            )
+            return {"status": "success", "data": search_summary}
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"An error occurred during web search: {e}",
+            }
+
+    @register_innate_action(
+        "orchestrator", "Gets the current date and time in UTC."
+    )
+    async def get_current_datetime(
+        self, _timezone_str: str = "UTC", **kwargs: Any
+    ) -> Dict[str, Any]:
+        try:
             return {
                 "status": "success",
-                "data": "No results found from allowed domains.",
+                "data": datetime.now(timezone.utc).isoformat(),
             }
-
-        search_summary = "\n\n".join(
-            f"Title: {res['title']}\nSnippet: {res['body']}\nURL: {res['href']}"
-            for res in allowed_results
-        )
-        return {"status": "success", "data": search_summary}
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"An error occurred during web search: {e}",
-        }
-
-@register_innate_action(
-    "orchestrator", "Gets the current date and time in UTC."
-)
-async def get_current_datetime(
-    self, _timezone_str: str = "UTC", **kwargs: Any
-) -> Dict[str, Any]:
-    try:
-        return {
-            "status": "success",
-            "data": datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception as e:
-        return {
-            "status": "failure",
-            "description": f"Could not get current time: {e}",
-        }
+        except Exception as e:
+            return {
+                "status": "failure",
+                "description": f"Could not get current time: {e}",
+            }

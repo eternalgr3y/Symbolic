@@ -5,10 +5,10 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import aiofiles
-import faiss  # type: ignore
+import faiss
 import numpy as np
 from openai import APIConnectionError, AsyncOpenAI, OpenAIError, RateLimitError
 
@@ -114,7 +114,7 @@ class SymbolicMemory:
     def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.Index:
         if os.path.exists(path):
             try:
-                return faiss.read_index(path)  # type: ignore
+                return faiss.read_index(path)
             except Exception as e:
                 logging.error(
                     "Could not load FAISS index from %s, creating a new one. Error: %s",
@@ -137,10 +137,10 @@ class SymbolicMemory:
 
         if embedding_list:
             embedding_matrix = np.vstack(embedding_list).astype(np.float32)
-            new_index.add(embedding_matrix)  # type: ignore
+            new_index.add(embedding_matrix)
 
         self.faiss_index = new_index
-        faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH)  # type: ignore
+        faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH)
         logging.info(
             "FAISS index rebuilt successfully with %d vectors.", new_index.ntotal
         )
@@ -209,7 +209,7 @@ class SymbolicMemory:
 
         if valid_embeddings:
             embedding_matrix = np.vstack(valid_embeddings).astype(np.float32)
-            self.faiss_index.add(embedding_matrix)  # type: ignore
+            self.faiss_index.add(embedding_matrix)
             self._is_dirty = True
             logging.info(
                 "Successfully processed and added %d memories to FAISS index.",
@@ -344,3 +344,28 @@ Respond with ONLY the summary text.
     def get_total_memory_count(self) -> int:
         """Returns the total number of memories, including the buffer."""
         return len(self.memory_data) + len(self._embedding_buffer)
+
+    async def get_relevant_memories(
+        self, query: str, memory_types: Optional[List[MemoryType]] = None, limit: int = 5
+    ) -> List[MemoryEntryModel]:
+        """
+        Retrieves memories relevant to a query using semantic similarity.
+        """
+        if not self.memory_data:
+            return []
+
+        # Use simple keyword matching for now (can be enhanced with embeddings)
+        relevant_memories = []
+        query_lower = query.lower()
+
+        for memory in self.memory_data:
+            content_str = json.dumps(memory.content).lower()
+            if query_lower in content_str or query_lower in memory.type.lower():
+                if memory_types is None or memory.type in memory_types:
+                    relevant_memories.append(memory)
+
+        # Sort by importance and recency
+        relevant_memories.sort(
+            key=lambda m: (m.importance, m.timestamp), reverse=True
+        )
+        return relevant_memories[:limit]
