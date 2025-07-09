@@ -2,10 +2,12 @@
 
 import asyncio
 import logging
+import os
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
 from playwright.async_api import Browser, Page, async_playwright
+from watchfiles import awatch
 
 from .agent_pool import DynamicAgentPool
 from .api_client import client
@@ -68,10 +70,10 @@ class SymbolicAGI:
     page: Optional[Page] = None
 
     def __init__(
-        self, cfg: AGIConfig = AGIConfig(), world: Optional[MicroWorld] = None
+        self, cfg: Optional[AGIConfig] = None, world: Optional[MicroWorld] = None
     ) -> None:
-        self.cfg = cfg
-        self.name = cfg.name
+        self.cfg = cfg or AGIConfig()
+        self.name = self.cfg.name
         self.message_bus = MessageBus()
         self.memory = SymbolicMemory(client)
         self.identity = SymbolicIdentity(self.memory)
@@ -301,44 +303,30 @@ class SymbolicAGI:
         return {default_key: value}
 
     async def _workspace_monitor_task(self) -> None:
-        logging.info("Workspace monitor task started.")
-        known_files: Set[str] = set()
-
+        """
+        Uses watchfiles to efficiently monitor the workspace directory for changes.
+        This is an event-driven approach, superior to polling.
+        """
+        logging.info("Async workspace watchdog started.")
         try:
-            initial_files = await self.tools.list_files()
-            if initial_files.get("status") == "success":
-                files_list = cast(List[str], initial_files.get("files", []))
-                known_files.update(files_list)
-        except Exception as e:
-            logging.error("Error during initial workspace scan: %s", e)
-
-        while True:
-            await asyncio.sleep(5)
-            try:
-                current_files_result = await self.tools.list_files()
-                if current_files_result.get("status") != "success":
-                    continue
-
-                current_files_list = cast(
-                    List[str], current_files_result.get("files", [])
-                )
-                current_files: Set[str] = set(current_files_list)
-                new_files: Set[str] = current_files - known_files
-
-                for file in new_files:
+            async for changes in awatch(self.tools.workspace_dir):
+                for change_type, path in changes:
+                    file_path = os.path.relpath(path, self.tools.workspace_dir)
+                    logging.info(
+                        "PERCEPTION: Detected file change '%s' in workspace: %s",
+                        change_type.name,
+                        file_path,
+                    )
                     event = PerceptionEvent(
                         source="workspace",
-                        type="file_created",
-                        content={"file_path": file},
+                        type=f"file_{change_type.name}",  # e.g., file_added, file_modified
+                        content={"file_path": file_path},
                     )
                     self.perception_buffer.append(event)
-                    logging.info(
-                        "PERCEPTION: New file detected in workspace: %s", file
-                    )
-
-                known_files = current_files
-            except Exception as e:
-                logging.error("Error in workspace monitor task: %s", e, exc_info=True)
+        except asyncio.CancelledError:
+            logging.info("Async workspace watchdog cancelled.")
+        except Exception as e:
+            logging.error("Error in workspace watchdog task: %s", e, exc_info=True)
 
     async def startup_validation(self) -> None:
         """Validates and repairs any malformed goals during startup."""

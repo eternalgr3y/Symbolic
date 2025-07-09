@@ -31,7 +31,9 @@ class MessageBus:
                 f"[MessageBus] Published message from '{message.sender_id}' to '{receiver_id}'."
             )
         else:
-            logging.warning(f"[MessageBus] No agent named '{receiver_id}' is subscribed.")
+            logging.warning(
+                f"[MessageBus] No agent named '{receiver_id}' is subscribed."
+            )
 
     async def broadcast(self, message: MessageModel) -> None:
         """
@@ -39,7 +41,9 @@ class MessageBus:
         Useful for system-wide announcements like new skills.
         """
         self.broadcast_log.append(message)
-        logging.info(f"[MessageBus] BROADCAST from '{message.sender_id}': {message.payload}")
+        logging.info(
+            f"[MessageBus] BROADCAST from '{message.sender_id}': {message.payload}"
+        )
         for agent_id, queue in self.agent_queues.items():
             if agent_id != message.sender_id:
                 await queue.put(message)

@@ -32,8 +32,8 @@ DEBATE_TIMEOUT_SECONDS = 90
 ENERGY_REGEN_AMOUNT = 5
 INITIAL_TRUST_SCORE = 1.0
 MAX_TRUST_SCORE = 1.0
-TRUST_DECAY_RATE = 0.1 # Amount of trust lost on failure
-TRUST_REWARD_RATE = 0.05 # Amount of trust gained on success
+TRUST_DECAY_RATE = 0.1  # Amount of trust lost on failure
+TRUST_REWARD_RATE = 0.05  # Amount of trust gained on success
 ALLOWED_DOMAINS: Set[str] = {
     "api.openai.com",
     "duckduckgo.com",

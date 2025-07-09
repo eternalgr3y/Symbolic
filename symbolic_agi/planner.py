@@ -66,7 +66,7 @@ class Planner:
 
         return plan
 
-    async def decompose_goal_into_plan(
+    async def decompose_goal_into_plan(  # noqa: C901
         self,
         goal_description: str,
         file_manifest: str,
@@ -77,7 +77,6 @@ class Planner:
         """
         Uses an LLM to generate or refine a plan, then validates and repairs it.
         """
-        # MODIFIED: Get structured definitions and serialize them for the prompt
         all_actions = self.agent_pool.get_all_action_definitions()
         available_capabilities_json = json.dumps(
             [action.model_dump() for action in all_actions], indent=2
@@ -89,7 +88,6 @@ class Planner:
         )
         master_prompt: str
 
-        # MODIFIED: Updated prompt to work with structured JSON input for capabilities
         data_flow_instructions = """
 # WORKSPACE & DATA FLOW
 - The `orchestrator` maintains a temporary `workspace` for each goal.

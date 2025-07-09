@@ -1,13 +1,19 @@
 # tests/test_meta_cognition.py
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from symbolic_agi.agi_controller import SymbolicAGI
+
 # FIX: Import GoalModel to resolve the NameError
-from symbolic_agi.schemas import AGIConfig, ActionStep, GoalModel, MessageModel, SkillModel
+from symbolic_agi.schemas import (
+    ActionStep,
+    AGIConfig,
+    GoalModel,
+    MessageModel,
+    SkillModel,
+)
 
 
 @pytest.fixture
@@ -16,31 +22,22 @@ def mocked_agi() -> SymbolicAGI:
     Provides a SymbolicAGI instance with its dependencies mocked for testing
     the MetaCognitionUnit.
     """
-    with patch("symbolic_agi.agi_controller.Planner"), patch(
-        "symbolic_agi.agi_controller.SymbolicMemory"
-    ), patch("symbolic_agi.agi_controller.SymbolicIdentity"), patch(
-        "symbolic_agi.agi_controller.MicroWorld"
-    ), patch(
-        "symbolic_agi.agi_controller.SkillManager"
-    ) as MockSkillManager, patch(
-        "symbolic_agi.agi_controller.LongTermMemory"
-    ) as MockLTM, patch(
-        "symbolic_agi.agi_controller.ToolPlugin"
-    ), patch(
-        "symbolic_agi.agi_controller.RecursiveIntrospector"
-    ), patch(
-        "symbolic_agi.agi_controller.SymbolicEvaluator"
-    ), patch(
-        "symbolic_agi.agi_controller.Consciousness", create=True
-    ), patch(
-        "symbolic_agi.agi_controller.ExecutionUnit"
-    ), patch(
-        "symbolic_agi.agi_controller.MessageBus"
-    ), patch(
-        "symbolic_agi.agi_controller.DynamicAgentPool"
-    ) as MockAgentPool, patch(
-        "symbolic_agi.agi_controller.async_playwright"
-    ) as mock_async_playwright:
+    with (
+        patch("symbolic_agi.agi_controller.Planner"),
+        patch("symbolic_agi.agi_controller.SymbolicMemory"),
+        patch("symbolic_agi.agi_controller.SymbolicIdentity"),
+        patch("symbolic_agi.agi_controller.MicroWorld"),
+        patch("symbolic_agi.agi_controller.SkillManager") as MockSkillManager,
+        patch("symbolic_agi.agi_controller.LongTermMemory") as MockLTM,
+        patch("symbolic_agi.agi_controller.ToolPlugin"),
+        patch("symbolic_agi.agi_controller.RecursiveIntrospector"),
+        patch("symbolic_agi.agi_controller.SymbolicEvaluator"),
+        patch("symbolic_agi.agi_controller.Consciousness", create=True),
+        patch("symbolic_agi.agi_controller.ExecutionUnit"),
+        patch("symbolic_agi.agi_controller.MessageBus"),
+        patch("symbolic_agi.agi_controller.DynamicAgentPool") as MockAgentPool,
+        patch("symbolic_agi.agi_controller.async_playwright") as mock_async_playwright,
+    ):
         mock_playwright_manager = AsyncMock()
         mock_playwright_instance = AsyncMock()
         mock_browser = AsyncMock()

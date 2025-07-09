@@ -1,8 +1,10 @@
 # symbolic_agi/run_agi.py
 
 import asyncio
+import atexit
 import logging
 import logging.handlers
+import signal
 from typing import Optional
 
 import colorlog
@@ -13,6 +15,8 @@ from .agent import Agent
 from .agi_controller import SymbolicAGI
 from .api_client import client
 from .schemas import AGIConfig, GoalMode, GoalModel
+
+SHUTDOWN_EVENT = asyncio.Event()
 
 
 def setup_logging() -> None:
@@ -54,14 +58,13 @@ def setup_logging() -> None:
     root_logger.addHandler(console_handler)
 
 
-async def main() -> None:
+async def main() -> None:  # noqa: C901
     """Initializes the AGI and runs the main interactive/autonomous loop."""
     agi: Optional[SymbolicAGI] = None
-    shutdown_event = asyncio.Event()
 
     async def autonomous_loop(agi_instance: SymbolicAGI) -> None:
         """The main cognitive heartbeat of the AGI."""
-        while not shutdown_event.is_set():
+        while not SHUTDOWN_EVENT.is_set():
             try:
                 metrics.ACTIVE_GOALS.set(len(agi_instance.ltm.goals))
                 metrics.AGENT_TASKS_RUNNING.set(len(agi_instance.agent_tasks))
@@ -100,8 +103,8 @@ async def main() -> None:
 
     async def user_input_loop(agi_instance: SymbolicAGI) -> None:
         """Handles user input to create new goals."""
-        loop = asyncio.get_running_loop()
-        while not shutdown_event.is_set():
+        loop = asyncio.get_event_loop()
+        while not SHUTDOWN_EVENT.is_set():
             try:
                 user_input = await loop.run_in_executor(
                     None,
@@ -123,6 +126,18 @@ async def main() -> None:
             except (EOFError, asyncio.CancelledError):
                 break
 
+    def shutdown_handler(signum=None, frame=None) -> None:
+        """Initiates a graceful shutdown."""
+        if SHUTDOWN_EVENT.is_set():
+            return
+        logging.critical("Shutdown signal received. Initiating graceful shutdown...")
+        SHUTDOWN_EVENT.set()
+
+    # Register shutdown handlers
+    atexit.register(shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
     try:
         setup_logging()
         logging.info("=" * 50)
@@ -131,7 +146,7 @@ async def main() -> None:
         start_http_server(8000)
         logging.info("Prometheus metrics server started on port 8000.")
 
-        agi = SymbolicAGI(cfg=AGIConfig())
+        agi = SymbolicAGI()
         await agi.startup_validation()
         await agi.start_background_tasks()
 
@@ -174,7 +189,7 @@ async def main() -> None:
     except Exception:
         logging.critical("A critical error occurred in the main runner:", exc_info=True)
     finally:
-        shutdown_event.set()
+        SHUTDOWN_EVENT.set()
         if agi:
             await agi.shutdown()
 

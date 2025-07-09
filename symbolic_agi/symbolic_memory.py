@@ -114,7 +114,7 @@ class SymbolicMemory:
     def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.Index:
         if os.path.exists(path):
             try:
-                return faiss.read_index(path) # type: ignore
+                return faiss.read_index(path)  # type: ignore
             except Exception as e:
                 logging.error(
                     "Could not load FAISS index from %s, creating a new one. Error: %s",
@@ -137,10 +137,10 @@ class SymbolicMemory:
 
         if embedding_list:
             embedding_matrix = np.vstack(embedding_list).astype(np.float32)
-            new_index.add(embedding_matrix) # type: ignore
+            new_index.add(embedding_matrix)  # type: ignore
 
         self.faiss_index = new_index
-        faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH) # type: ignore
+        faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH)  # type: ignore
         logging.info(
             "FAISS index rebuilt successfully with %d vectors.", new_index.ntotal
         )
@@ -209,7 +209,7 @@ class SymbolicMemory:
 
         if valid_embeddings:
             embedding_matrix = np.vstack(valid_embeddings).astype(np.float32)
-            self.faiss_index.add(embedding_matrix) # type: ignore
+            self.faiss_index.add(embedding_matrix)  # type: ignore
             self._is_dirty = True
             logging.info(
                 "Successfully processed and added %d memories to FAISS index.",

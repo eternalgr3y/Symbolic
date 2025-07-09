@@ -18,11 +18,18 @@ def run_tests():
 
     try:
         # Run pytest on the agent pool tests
-        result = subprocess.run([
-            sys.executable, "-m", "pytest",
-            "symbolic_agi/tests/test_agent_pool.py",
-            "-v", "--tb=short"
-        ], capture_output=True, text=True)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "symbolic_agi/tests/test_agent_pool.py",
+                "-v",
+                "--tb=short",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
         print("STDOUT:")
         print(result.stdout)
@@ -41,15 +48,16 @@ def run_tests():
     except Exception as e:
         print(f"❌ Error running tests: {e}")
 
+
 def run_demo():
     """Run the demo script."""
     print("\n🚀 Running DynamicAgentPool demo...")
     print("=" * 50)
 
     try:
-        result = subprocess.run([
-            sys.executable, "demo_agent_pool.py"
-        ], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "demo_agent_pool.py"], capture_output=True, text=True
+        )
 
         print("DEMO OUTPUT:")
         print(result.stdout)
@@ -60,6 +68,7 @@ def run_demo():
 
     except Exception as e:
         print(f"❌ Error running demo: {e}")
+
 
 if __name__ == "__main__":
     run_tests()

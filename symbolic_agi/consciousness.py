@@ -21,6 +21,7 @@ class Consciousness:
     file_path: str
     drives: Dict[str, float]
     life_story: Deque[LifeEvent]
+    _is_dirty: bool
 
     def __init__(
         self: "Consciousness", file_path: str = config.CONSCIOUSNESS_PROFILE_PATH
@@ -36,6 +37,7 @@ class Consciousness:
             ],
             maxlen=200,
         )
+        self._is_dirty = False
 
         if "drives" not in self.profile:
             logging.info(
@@ -48,6 +50,7 @@ class Consciousness:
                 "competence": 0.5,
                 "social_connection": 0.5,
             }
+            self._is_dirty = True
             self._save_profile()
 
     def _load_profile(self: "Consciousness") -> Dict[str, Any]:
@@ -66,6 +69,9 @@ class Consciousness:
 
     def _save_profile(self: "Consciousness") -> None:
         """Saves the consciousness profile, including the structured life story."""
+        if not self._is_dirty:
+            return
+
         self.profile["drives"] = self.drives
         self.profile["life_story"] = [
             event.model_dump(mode="json") for event in self.life_story
@@ -73,6 +79,7 @@ class Consciousness:
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(self.profile, f, indent=4)
+        self._is_dirty = False
 
     def set_drive(self: "Consciousness", drive_name: str, value: float) -> None:
         """
@@ -81,7 +88,8 @@ class Consciousness:
         """
         if drive_name in self.drives:
             self.drives[drive_name] = max(0.0, min(1.0, value))
-            self._save_profile()
+            self._is_dirty = True
+            # Defer saving to shutdown hook
         else:
             logging.warning("Attempted to set unknown drive: %s", drive_name)
 
@@ -91,7 +99,8 @@ class Consciousness:
         """Adds a new structured event to the life story and saves the profile."""
         event = LifeEvent(summary=event_summary, importance=importance)
         self.life_story.append(event)
-        self._save_profile()
+        self._is_dirty = True
+        # Defer saving to shutdown hook
 
     def get_narrative(self: "Consciousness") -> str:
         """Constructs a narrative string from the most recent and important life events."""
@@ -108,7 +117,9 @@ class Consciousness:
         # Sort back chronologically for narrative flow
         priority_events.sort(key=lambda evt: evt.timestamp)
 
-        narrative_parts = [f"[{evt.timestamp}] {evt.summary}" for evt in priority_events]
+        narrative_parts = [
+            f"[{evt.timestamp}] {evt.summary}" for evt in priority_events
+        ]
         return "\n".join(narrative_parts)
 
     async def meta_reflect(
@@ -178,7 +189,7 @@ your active drives, and what you want most right now.
                     1.0, self.drives[drive_name] + intensity * 0.3
                 )
 
-            self._save_profile()
+            self._is_dirty = True
             logging.debug(
                 "Drive '%s' updated to %.2f from %s (%s)",
                 drive_name,

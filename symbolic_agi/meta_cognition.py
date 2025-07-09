@@ -49,9 +49,7 @@ class MetaCognitionUnit:
             (self.document_undocumented_skills, 0.6),
         ]
         if self.agi.consciousness and hasattr(self.agi.consciousness, "meta_reflect"):
-            self.meta_upgrade_methods.append(
-                (self.agi.consciousness.meta_reflect, 0.9)
-            )
+            self.meta_upgrade_methods.append((self.agi.consciousness.meta_reflect, 0.9))
 
     async def document_undocumented_skills(self) -> None:
         """
@@ -130,7 +128,10 @@ class MetaCognitionUnit:
         reply = await self.agi.delegate_task_and_wait(qa_agent_name, review_step)
 
         if not reply or reply.payload.get("status") != "success":
-            logging.error("Failed to get a valid review from QA agent for skill '%s'.", skill_to_review.name)
+            logging.error(
+                "Failed to get a valid review from QA agent for skill '%s'.",
+                skill_to_review.name,
+            )
             return
 
         # If the skill is not approved, create a new goal to improve it
@@ -158,8 +159,9 @@ class MetaCognitionUnit:
                 },
             )
         else:
-            logging.info("Meta-task: Skill '%s' was approved by QA.", skill_to_review.name)
-
+            logging.info(
+                "Meta-task: Skill '%s' was approved by QA.", skill_to_review.name
+            )
 
     async def record_meta_event(self, kind: MemoryType, data: Any) -> None:
         evt = MetaEventModel(type=kind, data=data)
@@ -174,14 +176,10 @@ class MetaCognitionUnit:
 
     async def compress_episodic_memory(self) -> None:
         if hasattr(self.agi.memory, "consolidate_memories"):
-            window_seconds = int(
-                self.agi.cfg.memory_compression_window.total_seconds()
-            )
+            window_seconds = int(self.agi.cfg.memory_compression_window.total_seconds())
             await self.agi.memory.consolidate_memories(window_seconds=window_seconds)
         else:
-            logging.warning(
-                "'consolidate_memories' method not found on memory object."
-            )
+            logging.warning("'consolidate_memories' method not found on memory object.")
 
     async def generate_goal_from_drives(self) -> None:
         if not self.agi.consciousness or not hasattr(self.agi.consciousness, "drives"):
@@ -217,9 +215,7 @@ class MetaCognitionUnit:
             if goal_description and "failed" not in goal_description.lower():
                 new_goal = GoalModel(description=goal_description.strip(), sub_tasks=[])
                 self.agi.ltm.add_goal(new_goal)
-                logging.critical(
-                    "AUTONOMOUS GOAL CREATED: '%s'", new_goal.description
-                )
+                logging.critical("AUTONOMOUS GOAL CREATED: '%s'", new_goal.description)
                 await self.record_meta_event(
                     "goal",
                     {"source": "drive_imbalance", "goal": new_goal.description},
@@ -386,7 +382,7 @@ class MetaCognitionUnit:
         while True:
             try:
                 await asyncio.sleep(self.agi.cfg.meta_task_sleep_seconds)
-                methods, weights = zip(*self.meta_upgrade_methods)
+                methods, weights = zip(*self.meta_upgrade_methods, strict=False)
                 funcs_to_run = random.choices(methods, weights=weights, k=2)
                 await asyncio.gather(
                     *(self._safe_run_meta_task(f) for f in funcs_to_run)

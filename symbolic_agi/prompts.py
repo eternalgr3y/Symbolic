@@ -118,7 +118,10 @@ Research Summary: {research_summary}
 
 Respond ONLY with the raw JSON object. """
 
-RESEARCH_TOPIC_PROMPT = ( "You are a master researcher. Provide a concise but comprehensive summary " "of the following topic: {topic}" )
+RESEARCH_TOPIC_PROMPT = (
+    "You are a master researcher. Provide a concise but comprehensive summary "
+    "of the following topic: {topic}"
+)
 
 REVIEW_CODE_PROMPT = """You are a master QA engineer. Review the following Python code for bugs, style issues, and potential improvements. Provide your feedback as a brief report.
 

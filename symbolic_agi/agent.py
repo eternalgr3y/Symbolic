@@ -114,9 +114,7 @@ class Agent:
                 },
             )
 
-    async def skill_interact_with_page(
-        self, params: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def skill_interact_with_page(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Analyzes the content of a web page and decides the next interaction.
         """

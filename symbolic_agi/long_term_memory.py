@@ -17,14 +17,16 @@ class LongTermMemory:
 
     def __init__(self, file_path: str = config.LONG_TERM_GOAL_PATH):
         self.file_path = file_path
+        self._is_dirty = False
         self.goals: Dict[str, GoalModel] = self._load_goals()
         logging.info("[LTM] Initialized with %d goals.", len(self.goals))
 
     def _load_goals(self) -> Dict[str, GoalModel]:
         """Loads active goals from a JSON file, validating them with Pydantic."""
-        if not os.path.exists(
-            config.LONG_TERM_GOAL_PATH
-        ) or os.path.getsize(config.LONG_TERM_GOAL_PATH) < 2:
+        if (
+            not os.path.exists(config.LONG_TERM_GOAL_PATH)
+            or os.path.getsize(config.LONG_TERM_GOAL_PATH) < 2
+        ):
             return {}
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
@@ -38,7 +40,10 @@ class LongTermMemory:
             return {}
 
     def save(self) -> None:
-        """Saves all current goals to a JSON file."""
+        """Saves all current goals to a JSON file if the state is dirty."""
+        if not self._is_dirty:
+            return
+
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -49,10 +54,12 @@ class LongTermMemory:
                 f,
                 indent=4,
             )
+        self._is_dirty = False
 
     def add_goal(self, goal: GoalModel) -> None:
         """Adds a new goal to the long-term memory."""
         self.goals[goal.id] = goal
+        self._is_dirty = True
         self.save()
 
     def get_goal_by_id(self, goal_id: str) -> Optional[GoalModel]:
@@ -63,6 +70,7 @@ class LongTermMemory:
         """Updates the status of a goal."""
         if goal := self.goals.get(goal_id):
             goal.status = status  # type: ignore[assignment]
+            self._is_dirty = True
             self.save()
 
     def get_active_goal(self) -> Optional[GoalModel]:
@@ -77,6 +85,7 @@ class LongTermMemory:
         if goal := self.goals.get(goal_id):
             if goal.sub_tasks:
                 goal.sub_tasks.pop(0)
+                self._is_dirty = True
                 self.save()
 
     def update_plan(self, goal_id: str, plan: List[ActionStep]) -> None:
@@ -85,6 +94,7 @@ class LongTermMemory:
             goal.sub_tasks = plan
             if goal.original_plan is None:
                 goal.original_plan = plan
+            self._is_dirty = True
             self.save()
 
     def invalidate_plan(self, goal_id: str, reason: str) -> None:
@@ -92,12 +102,14 @@ class LongTermMemory:
         if goal := self.goals.get(goal_id):
             goal.sub_tasks = []
             goal.last_failure = reason
+            self._is_dirty = True
             self.save()
 
     def increment_failure_count(self, goal_id: str) -> int:
         """Increments the failure count for a goal and returns the new count."""
         if goal := self.goals.get(goal_id):
             goal.failure_count += 1
+            self._is_dirty = True
             self.save()
             return goal.failure_count
         return 0
@@ -106,6 +118,7 @@ class LongTermMemory:
         """Increments the refinement count for a goal and returns the new count."""
         if goal := self.goals.get(goal_id):
             goal.refinement_count += 1
+            self._is_dirty = True
             self.save()
             return goal.refinement_count
         return 0
@@ -119,15 +132,14 @@ class LongTermMemory:
                     os.path.exists(config.GOAL_ARCHIVE_PATH)
                     and os.path.getsize(config.GOAL_ARCHIVE_PATH) > 2
                 ):
-                    with open(
-                        config.GOAL_ARCHIVE_PATH, "r", encoding="utf-8"
-                    ) as f:
+                    with open(config.GOAL_ARCHIVE_PATH, "r", encoding="utf-8") as f:
                         archive_data = json.load(f)
 
                 archive_data[goal.id] = goal.model_dump(mode="json")
 
                 with open(config.GOAL_ARCHIVE_PATH, "w", encoding="utf-8") as f:
                     json.dump(archive_data, f, indent=4)
+                self._is_dirty = True
                 self.save()  # Save the main goals file after removal
             except Exception as e:
                 logging.error(

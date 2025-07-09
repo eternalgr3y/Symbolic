@@ -230,8 +230,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
             if plan and recursion_depth < self.max_recursion_depth:
                 validated_plan = [ActionStep.model_validate(p) for p in plan]
                 if any(
-                    step.risk and step.risk.lower() == "high"
-                    for step in validated_plan
+                    step.risk and step.risk.lower() == "high" for step in validated_plan
                 ):
                     alt_style = random.choice(["skeptical", "creative", "cautious"])
                     logging.warning(

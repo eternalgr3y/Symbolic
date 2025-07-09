@@ -57,9 +57,7 @@ async def monitored_chat_completion(role: str, **kwargs: Any) -> ChatCompletion:
         return response
     except APIError as e:
         error_type = type(e).__name__
-        metrics.API_CALL_ERRORS.labels(
-            model=model_to_use, error_type=error_type
-        ).inc()
+        metrics.API_CALL_ERRORS.labels(model=model_to_use, error_type=error_type).inc()
         raise e
 
 
@@ -77,7 +75,9 @@ async def monitored_embedding_creation(**kwargs: Any) -> CreateEmbeddingResponse
             metrics.LLM_TOKEN_USAGE.labels(model=model_name, type="prompt").inc(
                 response.usage.prompt_tokens
             )
-            completion_tokens = response.usage.total_tokens - response.usage.prompt_tokens
+            completion_tokens = (
+                response.usage.total_tokens - response.usage.prompt_tokens
+            )
             metrics.LLM_TOKEN_USAGE.labels(model=model_name, type="completion").inc(
                 completion_tokens
             )

@@ -92,7 +92,7 @@ class DynamicAgentPool:
         personas: Set[str] = {
             agent.get("persona", "unknown") for agent in self.subagents.values()
         }
-        return sorted(list(personas))
+        return sorted(personas)
 
     def get_all_action_definitions(self) -> List[ActionDefinition]:
         """

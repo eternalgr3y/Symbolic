@@ -1,52 +1,51 @@
 [project]
 name = "symbolic-agi"
 version = "0.1.0"
-description = "A project demonstrating symbolic reasoning and self-improvement in an AGI architecture."
-authors = [{ name = "SymbolicAGI Team" }]
-license = "MIT"
-readme = "README.md"
-requires-python = ">=3.10"
+description = "A symbolic AGI architecture for complex reasoning and self-improvement."
+authors = [{ name = "Todd Goldfarb", email = "todd.goldfarb@example.com" }]
+requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.12.0",
-    "numpy>=1.24.0",
-    "faiss-cpu>=1.7.4",
-    "aiofiles>=23.1.0",
-    "python-dotenv>=1.0.0",
-    "beautifulsoup4>=4.12.2",
-    "requests>=2.31.0",
-    "duckduckgo-search>=4.1.1",
-    "prometheus-client>=0.17.1",
-    "pydantic>=2.5.2",
-    "playwright>=1.40.0",
-    "colorlog>=6.8.2",
+    "openai",
+    "pydantic",
+    "numpy",
+    "faiss-cpu",
+    "aiofiles",
+    "colorlog",
+    "prometheus-client",
+    "playwright",
+    "requests",
+    "beautifulsoup4",
+    "duckduckgo-search",
+    "watchfiles",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4.3",
-    "pytest-asyncio>=0.23.2",
-    "ruff>=0.1.7",
-    "mypy>=1.7.1",
-    "pre-commit>=3.5.0",
-    "memory-profiler>=0.61.0",
-    "types-requests",
+    "pytest",
+    "pytest-asyncio",
+    "mypy",
+    "ruff",
+    "pre-commit",
+    "memory-profiler",
 ]
-
-[project.scripts]
-run_agi = "symbolic_agi.run_agi:main_sync"
-
-[tool.ruff]
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-
-[tool.mypy]
-python_version = "3.10"
-strict = true
-ignore_missing_imports = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["symbolic_agi*"]
-exclude = ["data*", "tests*"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "C", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+strict = true
+
+[[tool.mypy.overrides]]
+module = "faiss"
+ignore_missing_imports = true

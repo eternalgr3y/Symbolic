@@ -72,7 +72,10 @@ class SymbolicIdentity:
             self._is_dirty = False
         except Exception as e:
             logging.error(
-                "Failed to save identity profile to %s: %s", self.file_path, e, exc_info=True
+                "Failed to save identity profile to %s: %s",
+                self.file_path,
+                e,
+                exc_info=True,
             )
 
     async def record_interaction(
@@ -89,7 +92,9 @@ class SymbolicIdentity:
             )
         )
 
-    def update_self_model_state(self: "SymbolicIdentity", updates: Dict[str, Any]) -> None:
+    def update_self_model_state(
+        self: "SymbolicIdentity", updates: Dict[str, Any]
+    ) -> None:
         """Updates the AGI's dynamic state attributes."""
         for key, value in updates.items():
             if hasattr(self, key):
