@@ -5,7 +5,8 @@ import logging
 import os
 import random
 from collections import deque
-from typing import Any, Callable, Dict, List, Optional, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 from . import config, prompts
 from .api_client import monitored_chat_completion
@@ -26,14 +27,14 @@ class RecursiveIntrospector:
         self.max_recursion_depth = max_recursion_depth
         self.debate_timeout = debate_timeout
         self.inner_monologue_log: deque[str] = deque(maxlen=500)
-        self.reasoning_mutations: List[str] = []
+        self.reasoning_mutations: list[str] = []
         self.load_mutations()
-        self.get_emotional_state: Optional[Callable[[], Dict[str, float]]] = None
+        self.get_emotional_state: Callable[[], dict[str, float]] | None = None
 
     def load_mutations(self) -> None:
         if os.path.exists(config.MUTATION_FILE_PATH):
             try:
-                with open(config.MUTATION_FILE_PATH, "r", encoding="utf-8") as f:
+                with open(config.MUTATION_FILE_PATH, encoding="utf-8") as f:
                     self.reasoning_mutations = json.load(f)
                 logging.info(
                     "Loaded %d reasoning mutations.", len(self.reasoning_mutations)
@@ -52,7 +53,7 @@ class RecursiveIntrospector:
         )
 
     async def analyze_failure_and_propose_mutation(
-        self, failure_context: Dict[str, Any]
+        self, failure_context: dict[str, Any]
     ) -> None:
         """
         Analyzes a plan failure and proposes a new reasoning mutation to prevent similar errors.
@@ -94,8 +95,8 @@ class RecursiveIntrospector:
             )
 
     async def _critique_and_refine_plan(
-        self, plan: List[Dict[str, Any]], task_prompt: str
-    ) -> List[Dict[str, Any]]:
+        self, plan: list[dict[str, Any]], task_prompt: str
+    ) -> list[dict[str, Any]]:
         critique_prompt = prompts.CRITIQUE_AND_REFINE_PLAN_PROMPT.format(
             task_prompt=task_prompt, plan_json=json.dumps(plan, indent=2)
         )
@@ -112,7 +113,7 @@ class RecursiveIntrospector:
                 )
                 return plan
 
-            refined_plan: List[Dict[str, Any]] = []
+            refined_plan: list[dict[str, Any]] = []
             for raw_item in raw_data:
                 try:
                     validated_step = ActionStep.model_validate(raw_item)
@@ -142,11 +143,11 @@ class RecursiveIntrospector:
 
     async def symbolic_loop(
         self,
-        global_workspace: Dict[str, Any],
+        global_workspace: dict[str, Any],
         action_definitions: str,
         recursion_depth: int = 0,
         reasoning_style: str = "balanced",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if recursion_depth > self.max_recursion_depth:
             return {"thought": "Reached max recursion.", "plan": [], "success": False}
 
@@ -177,7 +178,7 @@ Your task is: {task_prompt}
 ---
 # CURRENT CONTEXT
 Self-Model: {json.dumps(self_model, cls=Censor)}
-World State: {json.dumps(global_workspace.get('world_state', {}), cls=Censor)}
+World State: {json.dumps(global_workspace.get("world_state", {}), cls=Censor)}
 Available Skills & Actions: {action_definitions}
 ---
 # INSTRUCTIONS
@@ -199,7 +200,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
                 raise ValueError("Received an empty response from the LLM.")
 
             content = resp.choices[0].message.content.strip()
-            parsed = cast(Dict[str, Any], json.loads(content))
+            parsed = cast("dict[str, Any]", json.loads(content))
 
             if parsed.get("plan"):
                 logging.info(
@@ -283,7 +284,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
             logging.error("LLM reflection call failed: %s", e, exc_info=True)
             return f"Reflection failed: {e}"
 
-    async def meta_assess(self, last_cycle_data: Dict[str, Any]) -> None:
+    async def meta_assess(self, last_cycle_data: dict[str, Any]) -> None:
         mutation_prompt = (
             "You are a self-improving AGI. Given the record of your last actions:\n"
             f"{json.dumps(last_cycle_data, cls=Censor)}\n"
@@ -316,7 +317,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
             if "```json" in response:
                 response = response.partition("```json")[2].partition("```")[0]
 
-            new_mutations: List[str] = json.loads(response)
+            new_mutations: list[str] = json.loads(response)
 
             if new_mutations != self.reasoning_mutations:
                 logging.critical(
@@ -345,7 +346,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
 
     async def simulate_inner_debate(
         self, topic: str = "What is the best next action?"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         debate_prompt = (
             f"Simulate a debate on '{topic}' between three internal personas: "
             "'Cautious', 'Creative', and 'Pragmatic'. Each should give a paragraph, "
@@ -369,7 +370,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
             await self.identity.memory.add_memory(
                 MemoryEntryModel(type="debate", content=debate_obj, importance=0.6)
             )
-            return cast(Dict[str, Any], debate_obj)
+            return cast("dict[str, Any]", debate_obj)
         except Exception as e:
             logging.error(
                 "Failed to generate or parse inner debate: %s", e, exc_info=True

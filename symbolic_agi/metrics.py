@@ -2,6 +2,7 @@
 """
 Central registry for all Prometheus metrics used in the SymbolicAGI project.
 """
+
 from prometheus_client import Counter, Gauge, Histogram
 
 # --- LLM API Metrics ---
@@ -61,4 +62,9 @@ FAISS_INDEX_VECTORS = Gauge(
 EMBEDDING_BUFFER_FLUSHES = Counter(
     "symbolic_agi_embedding_buffer_flushes_total",
     "Total number of times the embedding buffer has been flushed",
+)
+
+EMBEDDING_FLUSH_LATENCY_SECONDS = Histogram(
+    "symbolic_agi_embedding_flush_latency_seconds",
+    "Time taken to flush the embedding buffer",
 )

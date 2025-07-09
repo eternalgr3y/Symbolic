@@ -1,15 +1,19 @@
 # symbolic_agi/skill_manager.py
 
+import asyncio
 import json
 import logging
+import inspect
 import os
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+import aiosqlite
 
 from . import config
 from .schemas import ActionDefinition, ActionParameter, ActionStep, SkillModel
 
 if TYPE_CHECKING:
-    from .message_bus import MessageBus
+    from .message_bus import RedisMessageBus
 
 
 _innate_action_registry: List[ActionDefinition] = []
@@ -21,10 +25,9 @@ def register_innate_action(
     """A decorator to register a tool or skill as an innate action."""
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        import inspect
-
         params = []
         sig = inspect.signature(func)
+        func_name = func.__name__.replace("skill_", "")
         for param in sig.parameters.values():
             if param.name not in ("self", "kwargs"):
                 params.append(
@@ -37,11 +40,13 @@ def register_innate_action(
                 )
 
         action_def = ActionDefinition(
-            name=func.__name__,
+            name=func_name,
             description=description,
             parameters=params,
             assigned_persona=persona,
         )
+        setattr(func, "_innate_action_persona", persona)
+        setattr(func, "_innate_action_def", action_def)
         _innate_action_registry.append(action_def)
         return func
 
@@ -53,47 +58,73 @@ class SkillManager:
 
     def __init__(
         self,
-        file_path: str = config.SKILLS_PATH,
-        message_bus: Optional["MessageBus"] = None,
+        db_path: str = config.DB_PATH,
+        message_bus: Optional["RedisMessageBus"] = None,
     ):
-        self.file_path = file_path
-        self.skills: Dict[str, SkillModel] = self._load_skills()
+        self._db_path = db_path
+        self.skills: Dict[str, SkillModel] = {}
         self.innate_actions: List[ActionDefinition] = _innate_action_registry
         self.message_bus = message_bus
-        logging.info("[SkillManager] Initialized with %d skills", len(self.skills))
+        self._save_lock = asyncio.Lock()
 
-    def _load_skills(self) -> Dict[str, SkillModel]:
-        if not os.path.exists(self.file_path):
-            return {}
-        try:
-            with open(self.file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                loaded_skills = {
-                    skill_id: SkillModel.model_validate(props)
-                    for skill_id, props in data.items()
-                }
-                logging.info("[SkillManager] Loading skills from %s", self.file_path)
-                for skill_id in loaded_skills:
-                    logging.info(
-                        "[SkillManager] Loaded skill '%s'",
-                        loaded_skills[skill_id].name,
-                    )
-                return loaded_skills
-        except (json.JSONDecodeError, TypeError) as e:
-            logging.error("Could not load skills from %s: %s", self.file_path, e)
-            return {}
+    @classmethod
+    async def create(cls, db_path: str = config.DB_PATH, message_bus: Optional["RedisMessageBus"] = None) -> "SkillManager":
+        """Asynchronous factory for creating a SkillManager instance."""
+        instance = cls(db_path, message_bus)
+        await instance._init_db()
+        await instance._load_skills()
+        logging.info("[SkillManager] Initialized with %d skills", len(instance.skills))
+        return instance
 
-    def _save_skills(self) -> None:
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-        with open(self.file_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    skill_id: skill.model_dump(mode="json")
-                    for skill_id, skill in self.skills.items()
-                },
-                f,
-                indent=4,
+    async def _init_db(self) -> None:
+        """Initializes the database and tables if they don't exist."""
+        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skills (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    action_sequence TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    usage_count INTEGER NOT NULL,
+                    effectiveness_score REAL NOT NULL,
+                    version INTEGER NOT NULL
+                )
+                """
             )
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_name_version ON skills (name, version);")
+            await db.commit()
+
+    async def _load_skills(self) -> None:
+        """Loads skills from the database."""
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute("SELECT * FROM skills") as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    skill_dict = {
+                        "id": row[0], "name": row[1], "description": row[2],
+                        "action_sequence": json.loads(row[3]),
+                        "created_at": row[4], "usage_count": row[5],
+                        "effectiveness_score": row[6], "version": row[7]
+                    }
+                    self.skills[row[0]] = SkillModel.model_validate(skill_dict)
+
+    async def _save_skill(self, skill: SkillModel) -> None:
+        """Saves a single skill to the database."""
+        async with self._save_lock:
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO skills VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        skill.id, skill.name, skill.description,
+                        json.dumps([s.model_dump() for s in skill.action_sequence]),
+                        skill.created_at, skill.usage_count,
+                        skill.effectiveness_score, skill.version
+                    )
+                )
+                await db.commit()
 
     async def add_new_skill(
         self, name: str, description: str, plan: List[ActionStep]
@@ -101,11 +132,8 @@ class SkillManager:
         """
         Creates a new, versioned skill from a successful plan and saves it.
         """
-        highest_version = 0
-        for skill in self.skills.values():
-            if skill.name == name:
-                highest_version = max(highest_version, skill.version)
-
+        versions_of_skill = [s for s in self.skills.values() if s.name == name]
+        highest_version = max([s.version for s in versions_of_skill], default=0)
         new_version = highest_version + 1
         logging.info("Creating new skill '%s' version %d.", name, new_version)
 
@@ -116,8 +144,8 @@ class SkillManager:
             version=new_version,
         )
         self.skills[new_skill.id] = new_skill
-        self._prune_old_skill_versions(name)
-        self._save_skills()
+        await self._save_skill(new_skill)
+        await self._prune_old_skill_versions(name)
 
         if self.message_bus:
             from .schemas import MessageModel
@@ -136,23 +164,28 @@ class SkillManager:
                 )
             )
 
-    def _prune_old_skill_versions(self, skill_name: str, keep: int = 3) -> None:
+    async def _prune_old_skill_versions(self, skill_name: str, keep: int = 3) -> None:
         """Keeps only the N most recent versions of a skill."""
         versions_of_skill = [s for s in self.skills.values() if s.name == skill_name]
         if len(versions_of_skill) <= keep:
             return
 
         versions_of_skill.sort(key=lambda s: s.version, reverse=True)
-
         skills_to_prune = versions_of_skill[keep:]
-        for skill in skills_to_prune:
-            logging.warning(
-                "Pruning old skill version: %s v%d (ID: %s)",
-                skill.name,
-                skill.version,
-                skill.id,
-            )
-            del self.skills[skill.id]
+
+        if skills_to_prune:
+            async with self._save_lock:
+                async with aiosqlite.connect(self._db_path) as db:
+                    for skill in skills_to_prune:
+                        logging.warning(
+                            "Pruning old skill version: %s v%d (ID: %s)",
+                            skill.name,
+                            skill.version,
+                            skill.id,
+                        )
+                        await db.execute("DELETE FROM skills WHERE id = ?", (skill.id,))
+                        self.skills.pop(skill.id, None)
+                    await db.commit()
 
     def get_skill_by_name(self, name: str) -> Optional[SkillModel]:
         """Finds the highest version of a skill by its unique name."""

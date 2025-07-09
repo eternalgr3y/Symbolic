@@ -3,58 +3,43 @@
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 from openai import AsyncOpenAI
+from .skill_manager import register_innate_action
 
 from . import prompts
 from .api_client import monitored_chat_completion
 from .schemas import MessageModel, SkillModel
+from .message_bus import RedisMessageBus
 
 if TYPE_CHECKING:
-    from .message_bus import MessageBus
+    from .message_bus import RedisMessageBus
 
 
 class Agent:
-    def __init__(self, name: str, message_bus: "MessageBus", api_client: AsyncOpenAI):
+    def __init__(self, name: str, message_bus: "RedisMessageBus", api_client: AsyncOpenAI):
         self.name = name
         self.persona = name.split("_")[-2].lower() if "_" in name else "specialist"
         self.bus = message_bus
         self.client = api_client
-        self.inbox = self.bus.subscribe(self.name)
+        self.inbox: "asyncio.Queue[MessageModel | None]" = self.bus.subscribe(self.name)
         self.running = True
-        self.skills: Dict[str, Callable[..., Any]] = self._initialize_skills()
         logging.info(
-            "Agent '%s' initialized with persona '%s' and skills: %s",
+            "Agent '%s' initialized with persona '%s'",
             self.name,
             self.persona,
-            list(self.skills.keys()),
         )
-
-    def _initialize_skills(self) -> Dict[str, Callable[..., Any]]:
-        """Initializes persona-specific skills."""
-        if self.persona == "coder":
-            return {"write_code": self.skill_write_code}
-        if self.persona == "research":
-            return {"research_topic": self.skill_research_topic}
-        if self.persona == "qa":
-            return {
-                "review_code": self.skill_review_code,
-                "review_plan": self.skill_review_plan,
-                "review_skill_efficiency": self.skill_review_skill_efficiency,
-            }
-        if self.persona == "browser":
-            return {"interact_with_page": self.skill_interact_with_page}
-        return {}
 
     async def run(self) -> None:
         """Main loop for the agent to process messages."""
         while self.running:
             try:
-                message: MessageModel = await asyncio.wait_for(
+                message = await asyncio.wait_for(
                     self.inbox.get(), timeout=1.0
                 )
-                await self.handle_message(message)
+                if message is not None:
+                    await self.handle_message(message)
                 self.inbox.task_done()
             except asyncio.TimeoutError:
                 continue
@@ -84,9 +69,16 @@ class Agent:
             message.message_type,
             message.sender_id,
         )
-        skill_to_run = self.skills.get(message.message_type)
-        if skill_to_run:
-            result_payload = await skill_to_run(message.payload)
+
+        skill_method = None
+        if hasattr(self, message.message_type):
+            method = getattr(self, message.message_type)
+            if hasattr(method, "_innate_action_persona"):
+                if getattr(method, "_innate_action_persona") == self.persona:
+                    skill_method = method
+
+        if skill_method:
+            result_payload = await skill_method(message.payload)
             await self._reply(message, result_payload)
         elif message.message_type == "new_skill_broadcast":
             skill_name = message.payload.get("skill_name")
@@ -114,6 +106,9 @@ class Agent:
                 },
             )
 
+    @register_innate_action(
+        "browser", "Analyzes a web page and decides the next interaction."
+    )
     async def skill_interact_with_page(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Analyzes the content of a web page and decides the next interaction.
@@ -139,6 +134,10 @@ class Agent:
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
+    @register_innate_action(
+        "qa",
+        "Reviews a learned skill's action sequence for potential improvements.",
+    )
     async def skill_review_skill_efficiency(
         self, params: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -177,6 +176,9 @@ class Agent:
             )
             return {"status": "failure", "error": str(e)}
 
+    @register_innate_action(
+        "qa", "Reviews a plan for logical flaws or inefficiency."
+    )
     async def skill_review_plan(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Reviews a plan for logical flaws, inefficiency, or misinterpretation of the
@@ -205,6 +207,9 @@ class Agent:
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
+    @register_innate_action(
+        "coder", "Generates Python code based on a prompt and context."
+    )
     async def skill_write_code(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Generates Python code, using and updating its own short-term state."""
         prompt = params.get("prompt", "Write a simple hello world python script.")
@@ -238,6 +243,9 @@ class Agent:
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
+    @register_innate_action(
+        "research", "Researches a given topic and provides a concise summary."
+    )
     async def skill_research_topic(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Researches a given topic and provides a concise summary."""
         topic = params.get("topic", "The history of artificial intelligence.")
@@ -255,6 +263,9 @@ class Agent:
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
+    @register_innate_action(
+        "qa", "Reviews provided Python code for quality and improvements."
+    )
     async def skill_review_code(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Reviews provided Python code for quality and improvements."""
         workspace = params.get("workspace", {})

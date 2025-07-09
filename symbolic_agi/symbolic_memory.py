@@ -5,9 +5,9 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set
 
-import aiofiles
+import aiosqlite
 import faiss
 import numpy as np
 from openai import APIConnectionError, AsyncOpenAI, OpenAIError, RateLimitError
@@ -18,23 +18,27 @@ from .schemas import MemoryEntryModel, MemoryType
 
 
 class SymbolicMemory:
-    """Manages the AGI's memory using Pydantic models for validation."""
+    """Manages the AGI's memory using a SQLite DB and FAISS index."""
 
-    faiss_index: faiss.Index
+    faiss_index: faiss.IndexIDMap
     _flush_task: Optional[asyncio.Task[None]]
 
-    def __init__(self: "SymbolicMemory", client: AsyncOpenAI):
+    def __init__(self: "SymbolicMemory", client: AsyncOpenAI, db_path: str = config.DB_PATH):
         self.client = client
-        self.memory_data: List[MemoryEntryModel] = self._load_json(
-            config.SYMBOLIC_MEMORY_PATH
-        )
-        self.faiss_index = self._load_faiss(config.FAISS_INDEX_PATH)
-        self._is_dirty: bool = False
-
+        self._db_path = db_path
+        self.memory_map: Dict[int, MemoryEntryModel] = {}
+        self.faiss_index_path = os.path.join(os.path.dirname(db_path), "symbolic_mem.index")
+        self.faiss_index = self._load_faiss(self.faiss_index_path)
         self._embedding_buffer: List[MemoryEntryModel] = []
         self._embedding_batch_size: int = 10
-
         self._flush_task = asyncio.create_task(self._embed_daemon())
+
+    @classmethod
+    async def create(cls, client: AsyncOpenAI, db_path: str = config.DB_PATH) -> "SymbolicMemory":
+        """Asynchronous factory for creating a SymbolicMemory instance."""
+        instance = cls(client, db_path)
+        await instance._init_db_and_load()
+        return instance
 
     async def shutdown(self) -> None:
         """Gracefully shuts down the embedding daemon task."""
@@ -44,7 +48,7 @@ class SymbolicMemory:
                 await self._flush_task
             except asyncio.CancelledError:
                 logging.info("Embedding daemon task successfully cancelled.")
-        await self._process_embedding_buffer()
+        await self.save()
 
     async def _embed_daemon(self) -> None:
         """Periodically flushes the embedding buffer to ensure timely processing."""
@@ -52,9 +56,10 @@ class SymbolicMemory:
             try:
                 await asyncio.sleep(15)
                 if self._embedding_buffer:
-                    logging.info("Timed daemon is flushing the embedding buffer...")
-                    await self._process_embedding_buffer()
-                    metrics.EMBEDDING_BUFFER_FLUSHES.inc()
+                    with metrics.EMBEDDING_FLUSH_LATENCY_SECONDS.time():
+                        logging.info("Timed daemon is flushing the embedding buffer...")
+                        await self._process_embedding_buffer()
+                        metrics.EMBEDDING_BUFFER_FLUSHES.inc()
             except asyncio.CancelledError:
                 logging.info("Embedding daemon received cancel signal.")
                 break
@@ -62,59 +67,56 @@ class SymbolicMemory:
                 logging.error("Error in embedding daemon: %s", e, exc_info=True)
                 await asyncio.sleep(60)
 
-    def _load_json(self: "SymbolicMemory", path: str) -> List[MemoryEntryModel]:
-        if not os.path.exists(path) or os.path.getsize(path) < 2:
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return [MemoryEntryModel.model_validate(item) for item in data]
-        except Exception as e:
-            logging.error(
-                "Could not load symbolic memory from %s: %s", path, e, exc_info=True
+    async def _init_db_and_load(self) -> None:
+        """Initializes the database and loads existing memories."""
+        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id INTEGER PRIMARY KEY,
+                    uuid TEXT UNIQUE NOT NULL,
+                    type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    importance REAL NOT NULL,
+                    embedding BLOB
+                )
+                """
             )
-            return []
+            await db.commit()
+
+            async with db.execute("SELECT id, uuid, type, content, timestamp, importance FROM memories") as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    mem_dict = {
+                        "id": row[1], "type": row[2], "content": json.loads(row[3]),
+                        "timestamp": row[4], "importance": row[5]
+                    }
+                    self.memory_map[row[0]] = MemoryEntryModel.model_validate(mem_dict)
+        logging.info("Loaded %d memories from SQLite.", len(self.memory_map))
 
     async def save(self) -> None:
-        """Public method to save memory if it's dirty."""
+        """Public method to flush the buffer and save the FAISS index."""
         await self._process_embedding_buffer()
-        await self._save_json()
+        if self.faiss_index.ntotal > 0:
+            faiss.write_index(self.faiss_index, self.faiss_index_path)
+            logging.info("FAISS index saved to %s.", self.faiss_index_path)
 
     def rebuild_index(self) -> None:
         """Public method to rebuild the FAISS index."""
         self._rebuild_faiss_index()
 
-    async def _save_json(self: "SymbolicMemory") -> None:
-        if not self._is_dirty:
-            return
-
-        if (
-            not self.memory_data
-            and os.path.exists(config.SYMBOLIC_MEMORY_PATH)
-            and os.path.getsize(config.SYMBOLIC_MEMORY_PATH) > 2
-        ):
-            logging.critical(
-                "SAFETY_CHECK: In-memory memory is empty but file on disk is not. "
-                "Aborting save."
-            )
-            return
-
-        os.makedirs(os.path.dirname(config.SYMBOLIC_MEMORY_PATH), exist_ok=True)
-
-        async with aiofiles.open(
-            config.SYMBOLIC_MEMORY_PATH, "w", encoding="utf-8"
-        ) as f:
-            content = json.dumps(
-                [entry.model_dump(mode="json") for entry in self.memory_data], indent=4
-            )
-            await f.write(content)
-        logging.info("Symbolic memory flushed to %s.", config.SYMBOLIC_MEMORY_PATH)
-        self._is_dirty = False
-
-    def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.Index:
+    def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.IndexIDMap:
+        """Loads the FAISS index, ensuring it's an IndexIDMap."""
+        index: faiss.Index
         if os.path.exists(path):
             try:
-                return faiss.read_index(path)
+                index = faiss.read_index(path)
+                if not isinstance(index, faiss.IndexIDMap):
+                    logging.warning("Loaded FAISS index is not an IndexIDMap. Rebuilding.")
+                    index = faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
+                return index
             except Exception as e:
                 logging.error(
                     "Could not load FAISS index from %s, creating a new one. Error: %s",
@@ -122,25 +124,26 @@ class SymbolicMemory:
                     e,
                     exc_info=True,
                 )
-                return faiss.IndexFlatL2(config.EMBEDDING_DIM)
-        return faiss.IndexFlatL2(config.EMBEDDING_DIM)
+        return faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
 
     def _rebuild_faiss_index(self: "SymbolicMemory") -> None:
         logging.info("Rebuilding FAISS index from memory data...")
-        new_index = faiss.IndexFlatL2(config.EMBEDDING_DIM)
+        new_index = faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
 
-        embedding_list: List[np.ndarray] = [
-            np.array(m.embedding, dtype=np.float32)
-            for m in self.memory_data
-            if m.embedding is not None
-        ]
+        embedding_list: List[np.ndarray] = []
+        id_list: List[int] = []
+        for db_id, mem in self.memory_map.items():
+            if mem.embedding is not None:
+                embedding_list.append(np.array(mem.embedding, dtype=np.float32))
+                id_list.append(db_id)
 
         if embedding_list:
             embedding_matrix = np.vstack(embedding_list).astype(np.float32)
-            new_index.add(embedding_matrix)
+            id_array = np.array(id_list).astype('int64')
+            new_index.add_with_ids(embedding_matrix, id_array)
 
         self.faiss_index = new_index
-        faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH)
+        faiss.write_index(self.faiss_index, self.faiss_index_path)
         logging.info(
             "FAISS index rebuilt successfully with %d vectors.", new_index.ntotal
         )
@@ -182,39 +185,53 @@ class SymbolicMemory:
         """Processes all memory entries in the buffer to generate and store embeddings."""
         if not self._embedding_buffer:
             return
-
-        logging.info(
-            "Processing embedding buffer with %d entries.", len(self._embedding_buffer)
-        )
-
-        entries_to_process = self._embedding_buffer[:]
-        self._embedding_buffer.clear()
-
-        texts_to_embed = [json.dumps(entry.content) for entry in entries_to_process]
-
-        embeddings = await self.embed_async(texts_to_embed)
-
-        if embeddings.shape[0] != len(entries_to_process):
-            logging.error(
-                "Embedding batch failed: Mismatch between entries and embeddings. "
-                "Entries discarded."
-            )
-            return
-
-        valid_embeddings: List[np.ndarray] = []
-        for i, entry in enumerate(entries_to_process):
-            entry.embedding = embeddings[i].tolist()
-            self.memory_data.append(entry)
-            valid_embeddings.append(embeddings[i])
-
-        if valid_embeddings:
-            embedding_matrix = np.vstack(valid_embeddings).astype(np.float32)
-            self.faiss_index.add(embedding_matrix)
-            self._is_dirty = True
+        
+        with metrics.EMBEDDING_FLUSH_LATENCY_SECONDS.time():
             logging.info(
-                "Successfully processed and added %d memories to FAISS index.",
-                len(valid_embeddings),
+                "Processing embedding buffer with %d entries.", len(self._embedding_buffer)
             )
+
+            entries_to_process = self._embedding_buffer[:]
+            self._embedding_buffer.clear()
+
+            texts_to_embed = [json.dumps(entry.content) for entry in entries_to_process]
+            embeddings = await self.embed_async(texts_to_embed)
+
+            if embeddings.shape[0] != len(entries_to_process):
+                logging.error(
+                    "Embedding batch failed: Mismatch between entries and embeddings. "
+                    "Entries discarded."
+                )
+                return
+
+            new_vectors: List[np.ndarray] = []
+            new_ids: List[int] = []
+
+            async with aiosqlite.connect(self._db_path) as db:
+                for i, entry in enumerate(entries_to_process):
+                    entry.embedding = embeddings[i].tolist()
+                    cursor = await db.execute(
+                        "INSERT INTO memories (uuid, type, content, timestamp, importance, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            entry.id, entry.type, json.dumps(entry.content),
+                            entry.timestamp, entry.importance,
+                            embeddings[i].tobytes()
+                        )
+                    )
+                    rowid = cursor.lastrowid
+                    if rowid:
+                        self.memory_map[rowid] = entry
+                        new_vectors.append(embeddings[i])
+                        new_ids.append(rowid)
+                await db.commit()
+
+            if new_vectors:
+                vector_matrix = np.vstack(new_vectors).astype('float32')
+                id_array = np.array(new_ids).astype('int64')
+                self.faiss_index.add_with_ids(vector_matrix, id_array)
+                logging.info(
+                    "Successfully processed and added %d memories to DB and FAISS index.", len(new_vectors)
+                )
 
     async def consolidate_memories(
         self: "SymbolicMemory", window_seconds: int = 86400
@@ -240,8 +257,8 @@ class SymbolicMemory:
 
         memories_to_consolidate = [
             mem
-            for mem in self.memory_data
-            if mem.type in eligible_types
+            for mem in self.memory_map.values()
+            if mem and mem.type in eligible_types
             and datetime.fromisoformat(mem.timestamp) > consolidation_window
         ]
 
@@ -250,7 +267,7 @@ class SymbolicMemory:
             return
 
         narrative_parts: List[str] = []
-        ids_to_remove: Set[str] = set()
+        db_ids_to_remove: Set[int] = set()
         total_importance = 0.0
         for mem in sorted(memories_to_consolidate, key=lambda m: m.timestamp):
             content_summary = json.dumps(mem.content)
@@ -260,7 +277,9 @@ class SymbolicMemory:
                 f"[{mem.timestamp}] ({mem.type}, importance: {mem.importance:.2f}): "
                 f"{content_summary}"
             )
-            ids_to_remove.add(mem.id)
+            for db_id, memory_entry in self.memory_map.items():
+                if memory_entry.id == mem.id:
+                    db_ids_to_remove.add(db_id)
             total_importance += mem.importance
 
         narrative_str = "\n".join(narrative_parts)
@@ -308,42 +327,42 @@ Respond with ONLY the summary text.
 
             consolidated_entry = MemoryEntryModel(
                 type="insight",
-                content={
-                    "summary": summary,
-                    "consolidated_ids": list(ids_to_remove),
-                },
+                content={"summary": summary},
                 importance=new_importance,
             )
 
             await self.add_memory(consolidated_entry)
 
-            self.memory_data = [
-                mem for mem in self.memory_data if mem.id not in ids_to_remove
-            ]
+            # Remove old memories from DB and in-memory map
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute(f"DELETE FROM memories WHERE id IN ({','.join('?' for _ in db_ids_to_remove)})", list(db_ids_to_remove))
+                await db.commit()
+
+            for db_id in db_ids_to_remove:
+                self.memory_map.pop(db_id, None)
 
             logging.info(
                 "Consolidated %d memories into one new insight: '%s...'",
-                len(ids_to_remove),
+                len(db_ids_to_remove),
                 summary[:80],
             )
 
             self._rebuild_faiss_index()
-            await self.save()
 
         except Exception as e:
             logging.error(
                 "An error occurred during memory consolidation: %s", e, exc_info=True
             )
 
-    def get_recent_memories(
+    async def get_recent_memories(
         self: "SymbolicMemory", n: int = 10
     ) -> List[MemoryEntryModel]:
-        combined = self.memory_data + self._embedding_buffer
-        return combined[-n:]
+        sorted_memories = sorted(self.memory_map.values(), key=lambda m: m.timestamp, reverse=True)
+        return sorted_memories[:n]
 
     def get_total_memory_count(self) -> int:
         """Returns the total number of memories, including the buffer."""
-        return len(self.memory_data) + len(self._embedding_buffer)
+        return len(self.memory_map) + len(self._embedding_buffer)
 
     async def get_relevant_memories(
         self, query: str, memory_types: Optional[List[MemoryType]] = None, limit: int = 5
@@ -351,20 +370,21 @@ Respond with ONLY the summary text.
         """
         Retrieves memories relevant to a query using semantic similarity.
         """
-        if not self.memory_data:
+        if self.faiss_index.ntotal == 0:
             return []
 
-        # Use simple keyword matching for now (can be enhanced with embeddings)
-        relevant_memories = []
-        query_lower = query.lower()
+        query_embedding = await self.embed_async([query])
+        if query_embedding.size == 0:
+            return []
 
-        for memory in self.memory_data:
-            content_str = json.dumps(memory.content).lower()
-            if query_lower in content_str or query_lower in memory.type.lower():
+        distances, ids = self.faiss_index.search(query_embedding.astype('float32'), limit * 2)
+
+        relevant_memories: List[MemoryEntryModel] = []
+        for db_id in ids[0]:
+            if db_id != -1 and (memory := self.memory_map.get(int(db_id))):
                 if memory_types is None or memory.type in memory_types:
                     relevant_memories.append(memory)
 
-        # Sort by importance and recency
         relevant_memories.sort(
             key=lambda m: (m.importance, m.timestamp), reverse=True
         )

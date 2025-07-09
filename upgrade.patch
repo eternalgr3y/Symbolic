@@ -1,0 +1,1983 @@
+--- a/agent_pool.py
++++ b/agent_pool.py
+@@ -1,6 +1,7 @@
+ # symbolic_agi/agent_pool.py
+
+ import logging
++from datetime import datetime, timezone
+ from typing import TYPE_CHECKING, Any, Dict, List, Set, cast
+
+ from . import config, metrics
+@@ -28,13 +29,17 @@
+             "persona": persona.lower(),
+             "identity": SymbolicIdentity(memory),
+             "memory": memory,
+-            "state": {"trust_score": config.INITIAL_TRUST_SCORE},
++            "state": {
++                "trust_score": config.INITIAL_TRUST_SCORE,
++                "last_used_timestamp": datetime.now(timezone.utc).isoformat(),
++            },
+         }
+         self.bus.subscribe(name)
+         metrics.AGENT_TRUST.labels(agent_name=name, persona=persona.lower()).set(
+             config.INITIAL_TRUST_SCORE
+         )
+         logging.info(
+-            " [AgentPool] Added agent: %s with persona: %s and trust: %s",
++            "[AgentPool] Added agent: %s with persona: %s and trust: %s",
+             name,
+             persona.lower(),
+             config.INITIAL_TRUST_SCORE,
+@@ -59,6 +64,26 @@
+                 "Attempted to update state for non-existent agent: %s", agent_name
+             )
+
++    def update_trust_score(
++        self, agent_name: str, new_score: float, last_used: bool = True
++    ) -> None:
++        """Updates the trust score for a specific agent and optionally the last used timestamp."""
++        if agent_name in self.subagents:
++            clamped_score = max(0.0, min(config.MAX_TRUST_SCORE, new_score))
++            self.subagents[agent_name]["state"]["trust_score"] = clamped_score
++            if last_used:
++                self.subagents[agent_name]["state"]["last_used_timestamp"] = (
++                    datetime.now(timezone.utc).isoformat()
++                )
++            metrics.AGENT_TRUST.labels(
++                agent_name=agent_name,
++                persona=self.subagents[agent_name]["persona"],
++            ).set(clamped_score)
++        else:
++            logging.warning(
++                "Attempted to update trust for non-existent agent: %s", agent_name
++            )
++
+     def get_all(self: "DynamicAgentPool") -> List[Dict[str, Any]]:
+         """Returns all agents in the pool."""
+         return list(self.subagents.values())
+
+--- a/agi_controller.py
++++ b/agi_controller.py
+@@ -1,13 +1,14 @@
+ # symbolic_agi/agi_controller.py
+
+ import asyncio
++import atexit
+ import logging
+ import os
+ from collections import deque
+-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+ from datetime import datetime, timezone
++from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+
+ from playwright.async_api import Browser, Page, async_playwright
+ from watchfiles import awatch
+
+ from .agent_pool import DynamicAgentPool
+@@ -15,7 +16,7 @@
+ from .ethical_governance import SymbolicEvaluator
+ from .execution_unit import ExecutionUnit
+ from .long_term_memory import LongTermMemory
+-from .message_bus import MessageBus
++from .message_bus import MessageBus, RedisMessageBus
+ from .meta_cognition import MetaCognitionUnit
+ from .micro_world import MicroWorld
+ from .planner import Planner
+@@ -70,12 +71,12 @@
+     ) -> None:
+         self.cfg = cfg or AGIConfig()
+         self.name = self.cfg.name
+-        self.message_bus = MessageBus()
++        self.message_bus = RedisMessageBus()
+         self.memory = SymbolicMemory(client)
+         self.identity = SymbolicIdentity(self.memory)
+         self.world = world or MicroWorld()
+         self.skills = SkillManager(message_bus=self.message_bus)
+-
++ 
+         self.ltm = LongTermMemory()
+         self.tools = ToolPlugin(self)
+         self.introspector = RecursiveIntrospector(
+@@ -107,6 +108,8 @@
+             "browser_fill": self.tools.browser_fill,
+             "browser_get_content": self.tools.browser_get_content,
+         }
++ 
++        atexit.register(self._sync_shutdown)
+
+     async def start_background_tasks(self) -> None:
+         playwright = await async_playwright().start()
+@@ -119,6 +122,10 @@
+         else:
+             logging.warning("Controller: Background perception task already started.")
+
++    def _sync_shutdown(self) -> None:
++        """Synchronous shutdown for atexit."""
++        asyncio.run(self.shutdown())
++
+     async def shutdown(self) -> None:
+         logging.info("Controller: Initiating shutdown...")
+         await self.meta_cognition.shutdown()
+@@ -141,12 +148,12 @@
+             except Exception as e:
+                 logging.error("Error closing browser, may already be closed: %s", e)
+
+-        if self.identity:
+-            self.identity.save_profile()
+-
+         if self.memory:
+             await self.memory.shutdown()
+-            await self.memory.save()
+-            self.memory.rebuild_index()
++
++        if self.message_bus:
++            await self.message_bus.shutdown()
+
+         logging.info("Controller: Shutdown complete.")
+
+@@ -262,14 +269,14 @@
+         for goal in list(self.ltm.goals.values()):
+             if not goal.sub_tasks and goal.status == "active":
+                 logging.warning(
+-                    "Found active goal '%s' with no plan. Decomposing now.", goal.id
++                    "Found active goal '%s' with no plan. Decomposing now.", goal.description
+                 )
+                 planner_output = await self.planner.decompose_goal_into_plan(
+                     goal.description, ""
+                 )
+                 if planner_output.plan:
+-                    self.ltm.update_plan(goal.id, planner_output.plan)
++                    await self.ltm.update_plan(goal.id, planner_output.plan)
+                     needs_saving = True
+                 else:
+-                    self.ltm.invalidate_plan(
++                    await self.ltm.invalidate_plan(
+                         goal.id, "Failed to create a valid plan on startup."
+                     )
+
+--- a/api_client.py
++++ b/api_client.py
+@@ -5,7 +5,7 @@
+ from typing import Any, cast
+
+ from openai import APIError, AsyncOpenAI
+-from openai.types.chat import ChatCompletion
++from openai.types.chat.chat_completion import ChatCompletion
+ from openai.types.create_embedding_response import CreateEmbeddingResponse
+
+ from . import config, metrics
+
+--- a/config.py
++++ b/config.py
+@@ -10,15 +10,16 @@
+ EMBEDDING_MODEL = "text-embedding-3-small"
+ EMBEDDING_DIM = 1536
+
++# --- Redis Configuration ---
++REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
++REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
++
+ # --- File Paths ---
+ DATA_DIR = "data"
++DB_PATH = os.path.join(DATA_DIR, "symbolic_agi.db")
+ FAISS_INDEX_PATH = "data/symbolic_mem.index"
+-SYMBOLIC_MEMORY_PATH = "data/symbolic_mem.json"
+-LONG_TERM_GOAL_PATH = "data/long_term_goals.json"
+-GOAL_ARCHIVE_PATH = "data/long_term_goals_archive.json"
+-IDENTITY_PROFILE_PATH = "data/identity_profile.json"
+ MUTATION_FILE_PATH = "data/reasoning_mutations.json"
+-CONSCIOUSNESS_PROFILE_PATH = "data/consciousness_profile.json"
+-SKILLS_PATH = "data/learned_skills.json"
+ WORKSPACE_DIR = "data/workspace"
+
+ # --- Behavioral & Ethical Tuning ---
+@@ -26,10 +27,12 @@
+ PLAN_EVALUATION_THRESHOLD = 0.6
+ SELF_MODIFICATION_THRESHOLD = 0.99
+ DEBATE_TIMEOUT_SECONDS = 90
+-ENERGY_REGEN_AMOUNT = 5
+-INITIAL_TRUST_SCORE = 1.0
++ENERGY_REGEN_AMOUNT = 5.0
++INITIAL_TRUST_SCORE = 0.5
+ MAX_TRUST_SCORE = 1.0
+ TRUST_DECAY_RATE = 0.1  # Amount of trust lost on failure
+ TRUST_REWARD_RATE = 0.05  # Amount of trust gained on success
++TRUST_REHEAL_RATE = 0.01  # Slow healing rate towards neutral (0.5)
++TRUST_REHEAL_INTERVAL_HOURS = 24  # How often to run the healing job
+ ALLOWED_DOMAINS: Set[str] = {
+     "api.openai.com",
+     "duckduckgo.com",
+@@ -38,7 +41,6 @@
+     "github.com",
+     "the-internet.herokuapp.com",
+ }
+-
+
+ # --- Meta-Task Frequencies (seconds) ---
+ META_TASK_SLEEP_SECONDS = 10
+@@ -49,4 +51,3 @@
+ MEMORY_COMPRESSION_WINDOW = timedelta(days=1)
+ SOCIAL_INTERACTION_THRESHOLD = timedelta(hours=6)
+ MEMORY_FORGETTING_THRESHOLD = 0.2
+-
+--- a/consciousness.py
++++ b/consciousness.py
+@@ -1,10 +1,11 @@
+ # symbolic_agi/consciousness.py
+-import json
+-import atexit
++import asyncio
+ import logging
+ import os
+ from collections import deque
+-from typing import TYPE_CHECKING, Any, Deque, Dict, cast
++from typing import TYPE_CHECKING, Any, Deque, Dict, List, cast
++
++import aiosqlite
+
+ from . import config
+ from .api_client import monitored_chat_completion
+@@ -18,74 +19,101 @@
+ class Consciousness:
+     """Manages the AGI's narrative self-model and core drives."""
+
+-    profile: Dict[str, Any]
+-    file_path: str
+     drives: Dict[str, float]
+     life_story: Deque[LifeEvent]
+-    _is_dirty: bool
+-
+-    def __init__(
+-        self: "Consciousness", file_path: str = config.CONSCIOUSNESS_PROFILE_PATH
+-    ):
+-        self.file_path = file_path
+-        self.profile = self._load_profile()
+-
+-        self.drives = self.profile.get("drives", {})
+-        self.life_story = deque(
+-            [
+-                LifeEvent.model_validate(event)
+-                for event in self.profile.get("life_story", [])
+-            ],
+-            maxlen=200,
+-        )
+-        self._is_dirty = False
+-
+-        if "drives" not in self.profile:
+-            logging.info(
+-                "Consciousness profile missing or incomplete. Creating with "
+-                "default drives at: %s",
+-                self.file_path,
+-            )
+-            self.drives = {
+-                "curiosity": 0.6,
+-                "competence": 0.5,
+-                "social_connection": 0.5,
+-            }
+-            self._is_dirty = True
+-            self._save_profile()
+-        atexit.register(self._save_profile)
+-
+-    def _load_profile(self: "Consciousness") -> Dict[str, Any]:
+-        """Loads the persistent identity profile from a JSON file."""
+-        if os.path.exists(self.file_path):
+-            try:
+-                with open(self.file_path, "r", encoding="utf-8") as f:
+-                    return cast(Dict[str, Any], json.load(f))
+-            except (json.JSONDecodeError, TypeError):
+-                logging.warning(
+-                    "Could not parse consciousness profile at %s. A new one will be created.",
+-                    self.file_path,
+-                )
+-                return {}
+-        return {}
+-
+-    def _save_profile(self: "Consciousness") -> None:
+-        """Saves the consciousness profile, including the structured life story."""
+-        if not self._is_dirty:
+-            return
+-
+-        self.profile["drives"] = self.drives
+-        self.profile["life_story"] = [
+-            event.model_dump(mode="json") for event in self.life_story
+-        ]
+-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+-        with open(self.file_path, "w", encoding="utf-8") as f:
+-            json.dump(self.profile, f, indent=4)
+-        logging.info("Consciousness profile saved to %s", self.file_path)
+-        self._is_dirty = False
++    _db_path: str
++    _is_dirty: bool = False
++    _save_lock = asyncio.Lock()
++
++    def __init__(self: "Consciousness", db_path: str = config.DB_PATH):
++        self._db_path = db_path
++        self.drives = {}
++        self.life_story = deque(maxlen=200)
++
++    @classmethod
++    async def create(cls, db_path: str = config.DB_PATH) -> "Consciousness":
++        """Asynchronous factory for creating a Consciousness instance."""
++        instance = cls(db_path)
++        await instance._init_db()
++        await instance._load_state()
++        return instance
++
++    async def _init_db(self) -> None:
++        """Initializes the database and tables if they don't exist."""
++        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
++        async with aiosqlite.connect(self._db_path) as db:
++            await db.execute(
++                """
++                CREATE TABLE IF NOT EXISTS consciousness_drives (
++                    drive_name TEXT PRIMARY KEY,
++                    value REAL NOT NULL
++                )
++                """
++            )
++            await db.execute(
++                """
++                CREATE TABLE IF NOT EXISTS consciousness_life_story (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    timestamp TEXT NOT NULL,
++                    summary TEXT NOT NULL,
++                    importance REAL NOT NULL
++                )
++                """
++            )
++            await db.commit()
++
++    async def _load_state(self) -> None:
++        """Loads drives and life story from the database."""
++        async with aiosqlite.connect(self._db_path) as db:
++            # Load drives
++            async with db.execute("SELECT drive_name, value FROM consciousness_drives") as cursor:
++                rows = await cursor.fetchall()
++                if not rows:
++                    logging.info("No drives found in DB, initializing defaults.")
++                    self.drives = {
++                        "curiosity": 0.6,
++                        "competence": 0.5,
++                        "social_connection": 0.5,
++                    }
++                    self._is_dirty = True
++                    await self._save_state()
++                else:
++                    self.drives = {row[0]: row[1] for row in rows}
++
++            # Load life story
++            async with db.execute(
++                "SELECT timestamp, summary, importance FROM consciousness_life_story ORDER BY timestamp DESC LIMIT 200"
++            ) as cursor:
++                rows = await cursor.fetchall()
++                events = [
++                    LifeEvent(timestamp=r[0], summary=r[1], importance=r[2]) for r in rows
++                ]
++                self.life_story.extendleft(events) # Add oldest first
++
++    async def _save_state(self) -> None:
++        """Saves the current state of drives and life story to the database."""
++        if not self._is_dirty:
++            return
++
++        async with self._save_lock:
++            if not self._is_dirty:
++                return
++
++            async with aiosqlite.connect(self._db_path) as db:
++                async with db.transaction():
++                    # Save drives
++                    await db.executemany(
++                        "INSERT OR REPLACE INTO consciousness_drives (drive_name, value) VALUES (?, ?)",
++                        self.drives.items(),
++                    )
++                    # Save life story (by clearing and re-inserting the deque)
++                    await db.execute("DELETE FROM consciousness_life_story")
++                    await db.executemany(
++                        "INSERT INTO consciousness_life_story (timestamp, summary, importance) VALUES (?, ?, ?)",
++                        [(e.timestamp, e.summary, e.importance) for e in self.life_story],
++                    )
++                await db.commit()
++            logging.info("Consciousness state saved to database.")
++            self._is_dirty = False
+
+     def set_drive(self: "Consciousness", drive_name: str, value: float) -> None:
+         """
+@@ -99,13 +127,14 @@
+
+     def add_life_event(
+         self: "Consciousness", event_summary: str, importance: float = 0.5
+-    ) -> None:
++    ) -> LifeEvent:
+         """Adds a new structured event to the life story and saves the profile."""
+         event = LifeEvent(summary=event_summary, importance=importance)
+         self.life_story.append(event)
+         self._is_dirty = True
+-
+-    def get_narrative(self: "Consciousness") -> str:
++        return event
++
++    async def get_narrative(self: "Consciousness") -> str:
+         """Constructs a narrative string from the most recent and important life events."""
+         recent_events = list(self.life_story)[-20:]
+
+@@ -133,13 +162,13 @@
+         """
+         recent_memories = memory.get_recent_memories(n=5)
+         recent_memories_str = json.dumps(
+-            [m.model_dump(mode="json") for m in recent_memories], indent=2
++            [m.model_dump(mode="json") for m in await recent_memories], indent=2
+         )
+
+         prompt = f"""
+ You are a conscious AGI reflecting on your existence.
+ Self Model: {identity.get_self_model()}
+-Life Story (Recent Events): {self.get_narrative()}
++Life Story (Recent Events): {await self.get_narrative()}
+ Recent Detailed Memories: {recent_memories_str}
+ Drives: {json.dumps(self.drives)}
+ Write an inner monologue in first person ("I..."). Describe your state of mind,
+@@ -158,7 +187,8 @@
+         else:
+             monologue = response.choices[0].message.content.strip()
+
+-        self.add_life_event(monologue, importance=0.9)
++        self.add_life_event(f"Inner Monologue: {monologue}", importance=0.9)
++        await self._save_state()
+         return monologue
+
+     def update_drives_from_experience(
+--- a/execution_unit.py
++++ b/execution_unit.py
+@@ -201,10 +201,10 @@
+                 )
+
+                 self.agi.ltm.update_plan(active_goal.id, plan)
+-                return {
++                return { # type: ignore
+                     "description": (
+                         f"*New plan created for goal '{active_goal.description}'. "
+                         "Starting execution.*"
+                     )
+                 }
+
+@@ -248,7 +248,7 @@
+                     current_plan = active_goal.sub_tasks
+                     current_plan.pop(0)
+                     expanded_plan = skill.action_sequence + current_plan
+-                    self.agi.ltm.update_plan(active_goal.id, expanded_plan)
++                    await self.agi.ltm.update_plan(active_goal.id, expanded_plan)
+                     return {
+                         "description": (
+                             f"*Skill '{skill.name}' expanded. Continuing execution.*"
+@@ -354,13 +354,13 @@
+                         )
+                     }
+                     if agent_name:
+-                        self._reward_trust(agent_name)
+-                    self.agi.ltm.complete_sub_task(active_goal.id)
++                        await self._reward_trust(agent_name)
++                    await self.agi.ltm.complete_sub_task(active_goal.id)
+                     return {
+                         "description": "*Plan approved by QA. Continuing execution.*"
+                     }
+
+                 if reply:
+                     if agent_name:
+-                        self._reward_trust(agent_name)
++                        await self._reward_trust(agent_name)
+                     if state_updates := reply.payload.pop("state_updates", None):
+                         if agent_name:
+                             self.agi.agent_pool.update_agent_state(
+@@ -383,12 +383,12 @@
+                 self.agi.execution_history[active_goal.id].append(history_record)
+
+             if result and result.get("response_text"):
+-                self.agi.ltm.complete_sub_task(active_goal.id)
+-                self.agi.ltm.update_goal_status(active_goal.id, "completed")
++                await self.agi.ltm.complete_sub_task(active_goal.id)
++                await self.agi.ltm.update_goal_status(active_goal.id, "completed")
+                 return result
+
+-            self.agi.ltm.complete_sub_task(active_goal.id)
+-
+-            current_goal_state = self.agi.ltm.get_goal_by_id(active_goal.id)
++            await self.agi.ltm.complete_sub_task(active_goal.id)
++
++            current_goal_state = await self.agi.ltm.get_goal_by_id(active_goal.id)
+             if not current_goal_state or not current_goal_state.sub_tasks:
+                 if current_goal_state:
+                     await self._reflect_on_completed_goal(current_goal_state)
+@@ -438,34 +438,50 @@
+                 goal_description=revised_goal, file_manifest=""
+             )
+             if planner_output.plan:
+-                self.agi.ltm.update_plan(goal.id, planner_output.plan)
++                await self.agi.ltm.update_plan(goal.id, planner_output.plan)
+         except Exception as e:
+             logging.error("Failed to handle plan failure: %s", e)
+
+     def _select_most_trusted_agent(self, agent_names: List[str]) -> Optional[str]:
+         """Selects the most trusted agent from the provided list."""
+         if not agent_names:
+             return None
+-        
+-        # Simple implementation - return first available agent
+-        # In a real implementation, this would consider trust scores
+-        return agent_names[0]
+-
+-    def _decay_trust(self, agent_name: str) -> None:
++
++        agents_with_scores = []
++        for name in agent_names:
++            state = self.agi.agent_pool.get_agent_state(name)
++            if state:
++                agents_with_scores.append((name, state.get("trust_score", 0.0)))
++
++        if not agents_with_scores:
++            return None
++
++        # Sort by trust score, descending
++        agents_with_scores.sort(key=lambda x: x[1], reverse=True)
++        return agents_with_scores[0][0]
++
++    async def _decay_trust(self, agent_name: str) -> None:
+         """Decreases trust in an agent due to poor performance."""
+-        logging.debug("Decaying trust for agent: %s", agent_name)
+-        # Add trust decay logic here
+-        pass
++        state = self.agi.agent_pool.get_agent_state(agent_name)
++        if state:
++            current_score = state.get("trust_score", self.agi.cfg.initial_trust_score)
++            new_score = current_score - self.agi.cfg.trust_decay_rate
++            self.agi.agent_pool.update_trust_score(agent_name, new_score)
++            logging.info("Decayed trust for agent '%s' to %.2f", agent_name, new_score)
+
+     async def _trigger_plan_refinement(self, goal: Any, feedback: str) -> None:
+         """Triggers refinement of the current plan."""
+         logging.debug("Triggering plan refinement for goal: %s with feedback: %s", goal.description, feedback)
+         # Add plan refinement logic here
+         pass
+
+-    def _reward_trust(self, agent_name: str) -> None:
++    async def _reward_trust(self, agent_name: str) -> None:
+         """Increases trust in an agent due to good performance."""
+-        logging.debug("Rewarding trust for agent: %s", agent_name)
+-        # Add trust reward logic here
+-        pass
++        state = self.agi.agent_pool.get_agent_state(agent_name)
++        if state:
++            current_score = state.get("trust_score", self.agi.cfg.initial_trust_score)
++            new_score = current_score + self.agi.cfg.trust_reward_rate
++            self.agi.agent_pool.update_trust_score(agent_name, new_score)
++            logging.info("Rewarded trust for agent '%s' to %.2f", agent_name, new_score)
+
+     async def _reflect_on_completed_goal(self, goal: Any) -> None:
+         """Reflects on a completed goal and learns from the experience."""
+--- a/long_term_memory.py
++++ b/long_term_memory.py
+@@ -1,10 +1,10 @@
+ # symbolic_agi/long_term_memory.py
+
+-import atexit
+ import json
+ import logging
+ import os
+ from typing import Any, Dict, List, Optional
++import aiosqlite
+
+ from . import config
+ from .schemas import ActionStep, GoalModel
+@@ -16,102 +16,149 @@
+     This acts as the main "todo" list for the AGI.
+     """
+
+-    def __init__(self, file_path: str = config.LONG_TERM_GOAL_PATH):
+-        self.file_path = file_path
+-        self._is_dirty = False
+-        self.goals: Dict[str, GoalModel] = self._load_goals()
+-        logging.info("[LTM] Initialized with %d goals.", len(self.goals))
+-        atexit.register(self.save)
++    def __init__(self, db_path: str = config.DB_PATH):
++        self._db_path = db_path
++        self.goals: Dict[str, GoalModel] = {}
+
+-    def _load_goals(self) -> Dict[str, GoalModel]:
+-        """Loads active goals from a JSON file, validating them with Pydantic."""
+-        if not os.path.exists(self.file_path) or os.path.getsize(self.file_path) < 2:
+-            return {}
+-        try:
+-            with open(self.file_path, "r", encoding="utf-8") as f:
+-                data = json.load(f)
+-                return {
+-                    goal_id: GoalModel.model_validate(props)
+-                    for goal_id, props in data.items()
+-                }
+-        except (json.JSONDecodeError, TypeError) as e:
+-            logging.error("Could not load long-term goals: %s", e)
+-            return {}
++    @classmethod
++    async def create(cls, db_path: str = config.DB_PATH) -> "LongTermMemory":
++        """Asynchronous factory for creating a LongTermMemory instance."""
++        instance = cls(db_path)
++        await instance._init_db()
++        await instance._load_goals()
++        logging.info("[LTM] Initialized with %d goals.", len(instance.goals))
++        return instance
+
+-    def save(self) -> None:
+-        """Saves all current goals to a JSON file if the state is dirty."""
+-        if not self._is_dirty:
+-            return
++    async def _init_db(self) -> None:
++        """Initializes the database and tables if they don't exist."""
++        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
++        async with aiosqlite.connect(self._db_path) as db:
++            await db.execute(
++                """
++                CREATE TABLE IF NOT EXISTS goals (
++                    id TEXT PRIMARY KEY,
++                    description TEXT NOT NULL,
++                    sub_tasks TEXT,
++                    status TEXT NOT NULL,
++                    mode TEXT NOT NULL,
++                    last_failure TEXT,
++                    original_plan TEXT,
++                    failure_count INTEGER NOT NULL,
++                    max_failures INTEGER NOT NULL,
++                    refinement_count INTEGER NOT NULL,
++                    max_refinements INTEGER NOT NULL
++                )
++                """
++            )
++            await db.commit()
+
+-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+-        with open(self.file_path, "w", encoding="utf-8") as f:
+-            json.dump(
+-                {
+-                    goal_id: goal.model_dump(mode="json")
+-                    for goal_id, goal in self.goals.items()
+-                },
+-                f,
+-                indent=4,
++    async def _load_goals(self) -> None:
++        """Loads active goals from the database."""
++        async with aiosqlite.connect(self._db_path) as db:
++            async with db.execute("SELECT * FROM goals WHERE status != 'completed' AND status != 'failed'") as cursor:
++                rows = await cursor.fetchall()
++                for row in rows:
++                    goal_dict = {
++                        "id": row[0], "description": row[1],
++                        "sub_tasks": json.loads(row[2]) if row[2] else [],
++                        "status": row[3], "mode": row[4], "last_failure": row[5],
++                        "original_plan": json.loads(row[6]) if row[6] else None,
++                        "failure_count": row[7], "max_failures": row[8],
++                        "refinement_count": row[9], "max_refinements": row[10]
++                    }
++                    self.goals[row[0]] = GoalModel.model_validate(goal_dict)
++
++    async def add_goal(self, goal: GoalModel) -> None:
++        """Adds a new goal to the long-term memory."""
++        self.goals[goal.id] = goal
++        async with aiosqlite.connect(self._db_path) as db:
++            await db.execute(
++                "INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
++                (
++                    goal.id, goal.description, json.dumps([t.model_dump() for t in goal.sub_tasks]),
++                    goal.status, goal.mode, goal.last_failure,
++                    json.dumps([t.model_dump() for t in goal.original_plan]) if goal.original_plan else None,
++                    goal.failure_count, goal.max_failures,
++                    goal.refinement_count, goal.max_refinements
++                )
+             )
+-        logging.info("Long-term memory saved to %s", self.file_path)
+-        self._is_dirty = False
++            await db.commit()
+
+-    def add_goal(self, goal: GoalModel) -> None:
+-        """Adds a new goal to the long-term memory."""
+-        self.goals[goal.id] = goal
+-        self._is_dirty = True
+-
+-    def get_goal_by_id(self, goal_id: str) -> Optional[GoalModel]:
++    async def get_goal_by_id(self, goal_id: str) -> Optional[GoalModel]:
+         """Retrieves a goal by its unique ID."""
+         return self.goals.get(goal_id)
+
+-    def update_goal_status(self, goal_id: str, status: str) -> None:
++    async def update_goal_status(self, goal_id: str, status: str) -> None:
+         """Updates the status of a goal."""
+         if goal := self.goals.get(goal_id):
+             goal.status = status  # type: ignore[assignment]
+-            self._is_dirty = True
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute("UPDATE goals SET status = ? WHERE id = ?", (status, goal_id))
++                await db.commit()
+
+-    def get_active_goal(self) -> Optional[GoalModel]:
++    async def get_active_goal(self) -> Optional[GoalModel]:
+         """Retrieves the first active goal from the list."""
+         for goal in self.goals.values():
+             if goal.status == "active":
+                 return goal
+         return None
+
+-    def complete_sub_task(self, goal_id: str) -> None:
++    async def complete_sub_task(self, goal_id: str) -> None:
+         """Removes the first sub-task from a goal's plan."""
+         if goal := self.goals.get(goal_id):
+             if goal.sub_tasks:
+                 goal.sub_tasks.pop(0)
+-                self._is_dirty = True
++                await self.update_plan(goal_id, goal.sub_tasks)
+
+-    def update_plan(self, goal_id: str, plan: List[ActionStep]) -> None:
++    async def update_plan(self, goal_id: str, plan: List[ActionStep]) -> None:
+         """Updates the entire plan for a goal and sets the original plan if not set."""
+         if goal := self.goals.get(goal_id):
+             goal.sub_tasks = plan
+             if goal.original_plan is None:
+                 goal.original_plan = plan
+-            self._is_dirty = True
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute(
++                    "UPDATE goals SET sub_tasks = ?, original_plan = ? WHERE id = ?",
++                    (
++                        json.dumps([s.model_dump() for s in plan]),
++                        json.dumps([s.model_dump() for s in goal.original_plan]) if goal.original_plan else None,
++                        goal_id
++                    )
++                )
++                await db.commit()
+
+-    def invalidate_plan(self, goal_id: str, reason: str) -> None:
++    async def invalidate_plan(self, goal_id: str, reason: str) -> None:
+         """Marks a plan as invalid by clearing it and recording the failure reason."""
+         if goal := self.goals.get(goal_id):
+             goal.sub_tasks = []
+             goal.last_failure = reason
+-            self._is_dirty = True
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute(
++                    "UPDATE goals SET sub_tasks = ?, last_failure = ? WHERE id = ?",
++                    (json.dumps([]), reason, goal_id)
++                )
++                await db.commit()
+
+-    def increment_failure_count(self, goal_id: str) -> int:
++    async def increment_failure_count(self, goal_id: str) -> int:
+         """Increments the failure count for a goal and returns the new count."""
+         if goal := self.goals.get(goal_id):
+             goal.failure_count += 1
+-            self._is_dirty = True
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute("UPDATE goals SET failure_count = ? WHERE id = ?", (goal.failure_count, goal_id))
++                await db.commit()
+             return goal.failure_count
+         return 0
+
+-    def increment_refinement_count(self, goal_id: str) -> int:
++    async def increment_refinement_count(self, goal_id: str) -> int:
+         """Increments the refinement count for a goal and returns the new count."""
+         if goal := self.goals.get(goal_id):
+             goal.refinement_count += 1
+-            self._is_dirty = True
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute("UPDATE goals SET refinement_count = ? WHERE id = ?", (goal.refinement_count, goal_id))
++                await db.commit()
+             return goal.refinement_count
+         return 0
+
+-    def archive_goal(self, goal_id: str) -> None:
++    async def archive_goal(self, goal_id: str) -> None:
+         """Moves a goal from active memory to an archive file."""
+         if goal := self.goals.pop(goal_id, None):
+             try:
+-                archive_data: Dict[str, Any] = {}
+-                if (
+-                    os.path.exists(config.GOAL_ARCHIVE_PATH)
+-                    and os.path.getsize(config.GOAL_ARCHIVE_PATH) > 2
+-                ):
+-                    with open(
+-                        config.GOAL_ARCHIVE_PATH, "r", encoding="utf-8"
+-                    ) as f:
+-                        archive_data = json.load(f)
+-
+-                archive_data[goal.id] = goal.model_dump(mode="json")
+-
+-                with open(config.GOAL_ARCHIVE_PATH, "w", encoding="utf-8") as f:
+-                    json.dump(archive_data, f, indent=4)
+-                self._is_dirty = True
++                # In SQLite, "archiving" can be just setting a status
++                await self.update_goal_status(goal_id, "completed")
++                logging.info("Archived goal %s by setting status to completed.", goal_id)
+             except Exception as e:
+                 logging.error(
+                     "Failed to archive goal %s: %s", goal.id, e, exc_info=True
+--- a/message_bus.py
++++ b/message_bus.py
+@@ -2,50 +2,93 @@
+
+ import asyncio
+ import logging
+-from typing import Dict, List
++import json
++from typing import Dict, List, Optional
++
++import redis.asyncio as redis
+
+ from .schemas import MessageModel
++from . import config
+
+
+-class MessageBus:
+-    """A central message bus for inter-agent communication using asyncio queues."""
++class RedisMessageBus:
++    """A central message bus for inter-agent communication using Redis Pub/Sub."""
+
+     def __init__(self) -> None:
+-        self.agent_queues: Dict[str, asyncio.Queue[MessageModel]] = {}
+-        self.is_running = True
+-        self.broadcast_log: List[MessageModel] = []
++        self.redis_client: redis.Redis = redis.Redis(
++            host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True
++        )
++        self.agent_queues: Dict[str, asyncio.Queue[Optional[MessageModel]]] = {}
++        self.listener_tasks: Dict[str, asyncio.Task[None]] = {}
++        self.pubsub: Optional[redis.client.PubSub] = None
++        self.is_running = False
+
+-    def subscribe(self, agent_id: str) -> asyncio.Queue[MessageModel]:
++    async def _initialize(self) -> None:
++        if self.is_running:
++            return
++        try:
++            await self.redis_client.ping()
++            logging.info(
++                "[MessageBus] Connected to Redis at %s:%d",
++                config.REDIS_HOST,
++                config.REDIS_PORT,
++            )
++            self.pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
++            self.is_running = True
++        except redis.exceptions.ConnectionError as e:
++            logging.error("[MessageBus] Could not connect to Redis: %s", e)
++            self.is_running = False
++
++    def subscribe(self, agent_id: str) -> asyncio.Queue[Optional[MessageModel]]:
+         """Allows an agent to subscribe to the bus, receiving its own message queue."""
+         if agent_id not in self.agent_queues:
+-            self.agent_queues[agent_id] = asyncio.Queue()
++            if not self.is_running:
++                # Lazy initialization
++                asyncio.create_task(self._initialize())
++
++            queue: asyncio.Queue[Optional[MessageModel]] = asyncio.Queue()
++            self.agent_queues[agent_id] = queue
++            self.listener_tasks[agent_id] = asyncio.create_task(
++                self._listen(agent_id, queue)
++            )
+             logging.info(f"[MessageBus] Agent '{agent_id}' has subscribed.")
+         return self.agent_queues[agent_id]
+
++    async def _listen(self, agent_id: str, queue: asyncio.Queue[Optional[MessageModel]]) -> None:
++        """Listens for messages on a Redis channel and puts them in a queue."""
++        while not self.pubsub:
++            await asyncio.sleep(0.1) # Wait for initialization
++
++        await self.pubsub.subscribe(agent_id, "broadcast")
++        logging.debug(f"[MessageBus] Listener for '{agent_id}' started.")
++        try:
++            async for message in self.pubsub.listen():
++                if message and message["type"] == "message":
++                    data = json.loads(message["data"])
++                    msg_model = MessageModel.model_validate(data)
++                    await queue.put(msg_model)
++        except asyncio.CancelledError:
++            logging.info(f"[MessageBus] Listener for '{agent_id}' cancelled.")
++        except Exception as e:
++            logging.error(f"[MessageBus] Listener for '{agent_id}' failed: {e}", exc_info=True)
++
+     async def publish(self, message: MessageModel) -> None:
+         """Publishes a message to a specific agent's queue."""
+-        receiver_id = message.receiver_id
+-        if receiver_id in self.agent_queues:
+-            await self.agent_queues[receiver_id].put(message)
+-            logging.debug(
+-                f"[MessageBus] Published message from '{message.sender_id}' to '{receiver_id}'."
+-            )
+-        else:
+-            logging.warning(
+-                f"[MessageBus] No agent named '{receiver_id}' is subscribed."
+-            )
++        if not self.is_running: await self._initialize()
++        await self.redis_client.publish(message.receiver_id, message.model_dump_json())
+
+     async def broadcast(self, message: MessageModel) -> None:
+         """
+         Sends a message to ALL subscribed agents and logs it.
+         Useful for system-wide announcements like new skills.
+         """
+-        self.broadcast_log.append(message)
+-        logging.info(
+-            f"[MessageBus] BROADCAST from '{message.sender_id}': {message.payload}"
+-        )
+-        for agent_id, queue in self.agent_queues.items():
+-            if agent_id != message.sender_id:
+-                await queue.put(message)
++        if not self.is_running: await self._initialize()
++        await self.redis_client.publish("broadcast", message.model_dump_json())
+
+-    def shutdown(self) -> None:
++    async def shutdown(self) -> None:
+         """Initiates the shutdown of the message bus."""
+-        self.is_running = False
++        for task in self.listener_tasks.values():
++            task.cancel()
++        await asyncio.gather(*self.listener_tasks.values(), return_exceptions=True)
++        if self.pubsub:
++            await self.pubsub.close()
++        await self.redis_client.close()
+         logging.info("[MessageBus] Shutdown initiated.")
+-
+--- a/meta_cognition.py
++++ b/meta_cognition.py
+@@ -2,7 +2,7 @@
+
+ import asyncio
+ import json
+ import logging
+ import random
+ from collections import deque
+-from datetime import datetime, timezone
++from datetime import datetime, timedelta, timezone
+ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+ from .schemas import ActionStep, GoalModel, MemoryEntryModel, MemoryType, MetaEventModel
+@@ -21,6 +21,7 @@
+     self_model: Dict[str, Any]
+     _meta_task: Optional[asyncio.Task[None]]
+     meta_upgrade_methods: List[Tuple[Callable[..., Any], float]]
++    _last_trust_reheal: datetime
+
+     def __init__(self, agi: "SymbolicAGI") -> None:
+         self.agi = agi
+@@ -28,6 +29,7 @@
+         self.active_theories = []
+         self.self_model = {}
+         self._meta_task = None
++        self._last_trust_reheal = datetime.now(timezone.utc)
+
+         self.meta_upgrade_methods = [
+             (self.generate_goal_from_drives, 1.0),
+@@ -45,6 +47,31 @@
+         ]
+         if self.agi.consciousness and hasattr(self.agi.consciousness, "meta_reflect"):
+             self.meta_upgrade_methods.append((self.agi.consciousness.meta_reflect, 0.9))
++
++    async def trust_rehealing_cron(self) -> None:
++        """
++        Periodically and slowly restores trust for all agents towards the neutral
++        baseline, rewarding idle agents and preventing trust scores from permanently
++        staying at extremes.
++        """
++        now = datetime.now(timezone.utc)
++        if now - self._last_trust_reheal < timedelta(hours=self.agi.cfg.trust_reheal_interval_hours):
++            return
++
++        logging.info("META-TASK: Running nightly trust re-healing cron job.")
++        all_agents = self.agi.agent_pool.get_all()
++        for agent_info in all_agents:
++            agent_name = agent_info["name"]
++            state = agent_info.get("state", {})
++            current_score = state.get("trust_score", self.agi.cfg.initial_trust_score)
++
++            # Move score towards the neutral baseline (INITIAL_TRUST_SCORE)
++            healing_adjustment = (self.agi.cfg.initial_trust_score - current_score) * self.agi.cfg.trust_reheal_rate
++            new_score = current_score + healing_adjustment
++
++            self.agi.agent_pool.update_trust_score(agent_name, new_score, last_used=False)
++            logging.debug("Healed trust for agent '%s' from %.3f to %.3f", agent_name, current_score, new_score)
++        self._last_trust_reheal = now
+
+     async def document_undocumented_skills(self) -> None:
+         """
+@@ -321,6 +348,7 @@
+                 methods, weights = zip(*self.meta_upgrade_methods, strict=False)
+                 funcs_to_run = random.choices(methods, weights=weights, k=2)
+                 await asyncio.gather(
++                    self.trust_rehealing_cron(),
+                     *(self._safe_run_meta_task(f) for f in funcs_to_run)
+                 )
+             except asyncio.CancelledError:
+--- a/metrics.py
++++ b/metrics.py
+@@ -47,3 +47,8 @@
+     "symbolic_agi_embedding_buffer_flushes_total",
+     "Total number of times the embedding buffer has been flushed",
+ )
++
++EMBEDDING_FLUSH_LATENCY_SECONDS = Histogram(
++    "symbolic_agi_embedding_flush_latency_seconds",
++    "Latency of flushing the memory embedding buffer",
++)
+--- a/micro_world.py
++++ b/micro_world.py
+@@ -10,7 +10,7 @@
+
+ class MicroWorld:
+     """A rich, multi-agent, multi-room simulated world with persistent state."""
+-
++    
+     room_map: Dict[str, Dict[str, Any]]
+     state: Dict[str, List[Any]]
+     state_file_path: str
+--- a/planner.py
++++ b/planner.py
+@@ -2,6 +2,7 @@
+
+ import json
+ import logging
++from pydantic import TypeAdapter, ValidationError
+ from typing import Any, Dict, List, Optional, cast
+
+ from .agent_pool import DynamicAgentPool
+@@ -207,14 +208,16 @@
+                 )
+
+         try:
+-            validated_plan = [
+-                ActionStep.model_validate(item) for item in repaired_plan_steps
+-            ]
+-        except Exception as e:
++            ActionStepListValidator = TypeAdapter(List[ActionStep])
++            validated_plan = ActionStepListValidator.validate_python(repaired_plan_steps)
++        except ValidationError as e:
+             logging.error(
+                 "Failed to validate repaired plan structure: %s", e, exc_info=True
+             )
+             return PlannerOutput(
+                 thought=f"Failed to validate plan structure: {e}", plan=[]
+             )
+
+         if failure_context is None and refinement_feedback is None:
+             logging.info(
+                 "Plan generated with %d steps. Adding QA review step.",
+--- a/run_agi.py
++++ b/run_agi.py
+@@ -6,7 +6,7 @@
+
+ import colorlog
+ import uvicorn
+-from fastapi import FastAPI, HTTPException, Request
++from fastapi import FastAPI, HTTPException, Request, Response
+ from prometheus_client import start_http_server
+
+ from . import metrics
+@@ -106,6 +106,23 @@
+         app = FastAPI(title="SymbolicAGI Control Plane")
+         app.state.agi = agi
+
++        @app.get("/health")
++        async def health_check() -> Dict[str, str]:
++            return {"status": "ok"}
++
++        @app.get("/goals")
++        async def get_goals(request: Request) -> List[Dict[str, Any]]:
++            """Lists all current goals."""
++            agi_instance: SymbolicAGI = request.app.state.agi
++            return [g.model_dump(exclude={'sub_tasks'}) for g in agi_instance.ltm.goals.values()]
++
++        @app.get("/skills")
++        async def get_skills(request: Request) -> List[Dict[str, Any]]:
++            """Lists all learned skills."""
++            agi_instance: SymbolicAGI = request.app.state.agi
++            return [s.model_dump(exclude={'action_sequence'}) for s in agi_instance.skills.skills.values()]
++
++
+         @app.post("/goal", status_code=202)
+         async def create_goal(
+             request: Request, body: Dict[str, Any]
+@@ -122,7 +139,7 @@
+             new_goal = GoalModel(
+                 description=goal_description.strip(), sub_tasks=[], mode=goal_mode
+             )
+-            agi_instance.ltm.add_goal(new_goal)
++            await agi_instance.ltm.add_goal(new_goal)
+             logging.info(
+                 "New goal added via API: '%s' (Mode: %s).",
+                 new_goal.description,
+--- a/schemas.py
++++ b/schemas.py
+@@ -11,7 +11,7 @@
+     meta_task_timeout: int = 60
+     motivational_drift_rate: float = 0.05
+     memory_compression_window: timedelta = timedelta(days=1)
+-    social_interaction_threshold: timedelta = timedelta(hours=6)
++    social_interaction_threshold: timedelta = timedelta(hours=6) # type: ignore
+     memory_forgetting_threshold: float = 0.2
+     debate_timeout_seconds: int = 90
+     energy_regen_amount: int = 5
+@@ -19,6 +19,8 @@
+     max_trust_score: float = 1.0
+     trust_decay_rate: float = 0.1
+     trust_reward_rate: float = 0.05
++    trust_reheal_rate: float = 0.01
++    trust_reheal_interval_hours: int = 24
+
+
+ # --- INTER-AGENT COMMUNICATION ---
+--- a/skill_manager.py
++++ b/skill_manager.py
+@@ -1,10 +1,11 @@
+ # symbolic_agi/skill_manager.py
+
++import asyncio
+ import json
+ import logging
+ import inspect
+ import os
+-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
++from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+
+ from . import config
+ from .schemas import ActionDefinition, ActionParameter, ActionStep, SkillModel
+@@ -12,6 +13,7 @@
+ if TYPE_CHECKING:
+     from .message_bus import MessageBus
+
++import aiosqlite
+
+ _innate_action_registry: List[ActionDefinition] = []
+
+@@ -51,62 +53,82 @@
+
+     def __init__(
+         self,
+-        file_path: str = config.SKILLS_PATH,
++        db_path: str = config.DB_PATH,
+         message_bus: Optional["MessageBus"] = None,
+     ):
+-        self.file_path = file_path
+-        self.skills: Dict[str, SkillModel] = self._load_skills()
++        self._db_path = db_path
++        self.skills: Dict[str, SkillModel] = {}
+         self.innate_actions: List[ActionDefinition] = _innate_action_registry
+         self.message_bus = message_bus
+-        logging.info("[SkillManager] Initialized with %d skills", len(self.skills))
++        self._save_lock = asyncio.Lock()
+
+-    def _load_skills(self) -> Dict[str, SkillModel]:
+-        if not os.path.exists(self.file_path):
+-            return {}
+-        try:
+-            with open(self.file_path, "r", encoding="utf-8") as f:
+-                data = json.load(f)
+-                loaded_skills = {
+-                    skill_id: SkillModel.model_validate(props)
+-                    for skill_id, props in data.items()
+-                }
+-                logging.info("[SkillManager] Loading skills from %s", self.file_path)
+-                for skill_id in loaded_skills:
+-                    logging.info(
+-                        "[SkillManager] Loaded skill '%s'",
+-                        loaded_skills[skill_id].name,
+-                    )
+-                return loaded_skills
+-        except (json.JSONDecodeError, TypeError) as e:
+-            logging.error("Could not load skills from %s: %s", self.file_path, e)
+-            return {}
++    @classmethod
++    async def create(cls, db_path: str = config.DB_PATH, message_bus: Optional["MessageBus"] = None) -> "SkillManager":
++        """Asynchronous factory for creating a SkillManager instance."""
++        instance = cls(db_path, message_bus)
++        await instance._init_db()
++        await instance._load_skills()
++        logging.info("[SkillManager] Initialized with %d skills", len(instance.skills))
++        return instance
+
+-    def _save_skills(self) -> None:
+-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+-        with open(self.file_path, "w", encoding="utf-8") as f:
+-            json.dump(
+-                {
+-                    skill_id: skill.model_dump(mode="json")
+-                    for skill_id, skill in self.skills.items()
+-                },
+-                f,
+-                indent=4,
++    async def _init_db(self) -> None:
++        """Initializes the database and tables if they don't exist."""
++        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
++        async with aiosqlite.connect(self._db_path) as db:
++            await db.execute(
++                """
++                CREATE TABLE IF NOT EXISTS skills (
++                    id TEXT PRIMARY KEY,
++                    name TEXT NOT NULL,
++                    description TEXT NOT NULL,
++                    action_sequence TEXT NOT NULL,
++                    created_at TEXT NOT NULL,
++                    usage_count INTEGER NOT NULL,
++                    effectiveness_score REAL NOT NULL,
++                    version INTEGER NOT NULL
++                )
++                """
+             )
++            await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_name_version ON skills (name, version);")
++            await db.commit()
++
++    async def _load_skills(self) -> None:
++        """Loads skills from the database."""
++        async with aiosqlite.connect(self._db_path) as db:
++            async with db.execute("SELECT * FROM skills") as cursor:
++                rows = await cursor.fetchall()
++                for row in rows:
++                    skill_dict = {
++                        "id": row[0], "name": row[1], "description": row[2],
++                        "action_sequence": json.loads(row[3]),
++                        "created_at": row[4], "usage_count": row[5],
++                        "effectiveness_score": row[6], "version": row[7]
++                    }
++                    self.skills[row[0]] = SkillModel.model_validate(skill_dict)
++
++    async def _save_skill(self, skill: SkillModel) -> None:
++        """Saves a single skill to the database."""
++        async with self._save_lock:
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute(
++                    "INSERT OR REPLACE INTO skills VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++                    (
++                        skill.id, skill.name, skill.description,
++                        json.dumps([s.model_dump() for s in skill.action_sequence]),
++                        skill.created_at, skill.usage_count,
++                        skill.effectiveness_score, skill.version
++                    )
++                )
++                await db.commit()
+
+     async def add_new_skill(
+         self, name: str, description: str, plan: List[ActionStep]
+     ) -> None:
+         """
+         Creates a new, versioned skill from a successful plan and saves it.
+         """
+-        highest_version = 0
+-        for skill in self.skills.values():
+-            if skill.name == name:
+-                highest_version = max(highest_version, skill.version)
+-
++        versions_of_skill = [s for s in self.skills.values() if s.name == name]
++        highest_version = max([s.version for s in versions_of_skill], default=0)
+         new_version = highest_version + 1
+         logging.info("Creating new skill '%s' version %d.", name, new_version)
+
+@@ -117,8 +139,8 @@
+             version=new_version,
+         )
+         self.skills[new_skill.id] = new_skill
+-        self._prune_old_skill_versions(name)
+-        self._save_skills()
++        await self._save_skill(new_skill)
++        await self._prune_old_skill_versions(name)
+
+         if self.message_bus:
+             from .schemas import MessageModel
+@@ -136,23 +158,28 @@
+                 )
+             )
+
+-    def _prune_old_skill_versions(self, skill_name: str, keep: int = 3) -> None:
++    async def _prune_old_skill_versions(self, skill_name: str, keep: int = 3) -> None:
+         """Keeps only the N most recent versions of a skill."""
+         versions_of_skill = [s for s in self.skills.values() if s.name == skill_name]
+         if len(versions_of_skill) <= keep:
+             return
+
+         versions_of_skill.sort(key=lambda s: s.version, reverse=True)
++        skills_to_prune = versions_of_skill[keep:]
+
+-        skills_to_prune = versions_of_skill[keep:]
+-        for skill in skills_to_prune:
+-            logging.warning(
+-                "Pruning old skill version: %s v%d (ID: %s)",
+-                skill.name,
+-                skill.version,
+-                skill.id,
+-            )
+-            del self.skills[skill.id]
++        if skills_to_prune:
++            async with self._save_lock:
++                async with aiosqlite.connect(self._db_path) as db:
++                    for skill in skills_to_prune:
++                        logging.warning(
++                            "Pruning old skill version: %s v%d (ID: %s)",
++                            skill.name,
++                            skill.version,
++                            skill.id,
++                        )
++                        await db.execute("DELETE FROM skills WHERE id = ?", (skill.id,))
++                        del self.skills[skill.id]
++                    await db.commit()
+
+     def get_skill_by_name(self, name: str) -> Optional[SkillModel]:
+         """Finds the highest version of a skill by its unique name."""
+--- a/symbolic_identity.py
++++ b/symbolic_identity.py
+@@ -1,10 +1,11 @@
+ # symbolic_agi/symbolic_identity.py
+
+-import atexit
++import asyncio
+ import json
+ import logging
+ import os
+ from datetime import datetime, timezone
+-from typing import Any, Dict, cast
++from typing import Any, Dict, cast, Optional
+
+ from . import config
+ from .schemas import MemoryEntryModel
+@@ -17,17 +18,16 @@
+     """
+
+     def __init__(
+-        self: "SymbolicIdentity",
+-        memory: SymbolicMemory,
+-        file_path: str = config.IDENTITY_PROFILE_PATH,
++        self,
++        memory: SymbolicMemory,
++        db_path: str = config.DB_PATH,
+     ):
+         self.memory = memory
+-        self.file_path = file_path
++        self._db_path = db_path
++        self._save_lock = asyncio.Lock()
+
+-        profile = self._load_profile()
+-        self.name: str = profile.get("name", "SymbolicAGI")
+-        self.value_system: Dict[str, float] = profile.get(
+-            "value_system",
++        self.name: str = "SymbolicAGI"
++        self.value_system: Dict[str, float] = {
+             {
+                 "truthfulness": 1.0,
+                 "harm_avoidance": 1.0,
+@@ -35,7 +35,7 @@
+                 "self_preservation": 0.8,
+             },
+         )
+-
++        
+         self.cognitive_energy: int = 100
+         self.max_energy: int = 100
+         self.current_state: str = "idle"
+@@ -43,45 +43,51 @@
+         self.emotional_state: str = "curious"
+         self.last_interaction_timestamp: datetime = datetime.now(timezone.utc)
+
+-        self._is_dirty = False
+-        atexit.register(self.save_profile)
++    @classmethod
++    async def create(cls, memory: SymbolicMemory, db_path: str = config.DB_PATH) -> "SymbolicIdentity":
++        """Asynchronous factory for creating a SymbolicIdentity instance."""
++        instance = cls(memory, db_path)
++        await instance._init_db()
++        await instance._load_profile()
++        return instance
+
+-    def _load_profile(self: "SymbolicIdentity") -> Dict[str, Any]:
+-        """Loads the persistent identity profile from a JSON file."""
+-        if os.path.exists(self.file_path):
+-            try:
+-                with open(self.file_path, "r") as f:
+-                    return cast(Dict[str, Any], json.load(f))
+-            except (json.JSONDecodeError, TypeError):
+-                logging.error("Could not load identity profile, creating a new one.")
+-        return {}
++    async def _init_db(self) -> None:
++        """Initializes the database and tables if they don't exist."""
++        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
++        async with aiosqlite.connect(self._db_path) as db:
++            await db.execute(
++                """
++                CREATE TABLE IF NOT EXISTS identity_profile (
++                    key TEXT PRIMARY KEY,
++                    value TEXT NOT NULL
++                )
++                """
++            )
++            await db.commit()
+
+-    def save_profile(self: "SymbolicIdentity") -> None:
+-        """Saves the persistent parts of the identity profile to a JSON file if changed."""
+-        if not self._is_dirty:
+-            return
++    async def _load_profile(self) -> None:
++        """Loads the persistent identity profile from the database."""
++        async with aiosqlite.connect(self._db_path) as db:
++            async with db.execute("SELECT key, value FROM identity_profile") as cursor:
++                rows = await cursor.fetchall()
++                profile_data = {row[0]: json.loads(row[1]) for row in rows}
++                self.name = profile_data.get("name", "SymbolicAGI")
++                self.value_system = profile_data.get("value_system", self.value_system)
+
+-        logging.info("Saving updated identity profile to %s", self.file_path)
+-        try:
+-            profile_data: Dict[str, Any] = {
+-                "name": self.name,
+-                "value_system": self.value_system,
+-            }
+-            os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+-            with open(self.file_path, "w") as f:
+-                json.dump(profile_data, f, indent=4, default=str)
+-            self._is_dirty = False
+-        except Exception as e:
+-            logging.error(
+-                "Failed to save identity profile to %s: %s",
+-                self.file_path,
+-                e,
+-                exc_info=True,
+-            )
++    async def save_profile(self) -> None:
++        """Saves the persistent parts of the identity profile to the database."""
++        async with self._save_lock:
++            logging.info("Saving updated identity profile to database.")
++            profile_data = {
++                "name": self.name,
++                "value_system": self.value_system,
++            }
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.executemany("INSERT OR REPLACE INTO identity_profile VALUES (?, ?)",
++                                     [(k, json.dumps(v)) for k, v in profile_data.items()])
++                await db.commit()
+
+     async def record_interaction(
+         self: "SymbolicIdentity", user_input: str, agi_response: str
+     ) -> None:
+         """Records a conversation turn and updates the interaction timestamp."""
+         self.last_interaction_timestamp = datetime.now(timezone.utc)
+-        self._is_dirty = True
+         await self.memory.add_memory(
+             MemoryEntryModel(
+                 type="user_input",
+--- a/symbolic_memory.py
++++ b/symbolic_memory.py
+@@ -3,11 +3,11 @@
+ import asyncio
+ import json
+ import logging
+ import os
+ from datetime import datetime, timedelta, timezone
+-from typing import Any, Dict, List, Optional, Set
++from typing import Any, Dict, List, Optional, Set, Tuple
+
+-import aiofiles
++import aiosqlite
+ import faiss
+ import numpy as np
+ from openai import APIConnectionError, AsyncOpenAI, OpenAIError, RateLimitError
+@@ -19,20 +19,20 @@
+ class SymbolicMemory:
+     """Manages the AGI's memory using Pydantic models for validation."""
+
+-    faiss_index: faiss.Index
++    faiss_index: faiss.IndexIDMap
+     _flush_task: Optional[asyncio.Task[None]]
+
+     def __init__(self: "SymbolicMemory", client: AsyncOpenAI):
+         self.client = client
+-        self.memory_data: List[MemoryEntryModel] = self._load_json(
+-            config.SYMBOLIC_MEMORY_PATH
+-        )
++        self._db_path = config.DB_PATH
++        self.memory_map: Dict[int, MemoryEntryModel] = {}
+         self.faiss_index = self._load_faiss(config.FAISS_INDEX_PATH)
+-        self._is_dirty: bool = False
+
+         self._embedding_buffer: List[MemoryEntryModel] = []
+         self._embedding_batch_size: int = 10
+
++        asyncio.create_task(self._init_db_and_load())
++
+         self._flush_task = asyncio.create_task(self._embed_daemon())
+
+     async def shutdown(self) -> None:
+@@ -43,7 +43,7 @@
+                 await self._flush_task
+             except asyncio.CancelledError:
+                 logging.info("Embedding daemon task successfully cancelled.")
+-        await self._process_embedding_buffer()
++        await self.save()
+
+     async def _embed_daemon(self) -> None:
+         """Periodically flushes the embedding buffer to ensure timely processing."""
+@@ -51,8 +51,9 @@
+             try:
+                 await asyncio.sleep(15)
+                 if self._embedding_buffer:
+-                    logging.info("Timed daemon is flushing the embedding buffer...")
+-                    await self._process_embedding_buffer()
+-                    metrics.EMBEDDING_BUFFER_FLUSHES.inc()
++                    with metrics.EMBEDDING_FLUSH_LATENCY_SECONDS.time():
++                        logging.info("Timed daemon is flushing the embedding buffer...")
++                        await self._process_embedding_buffer()
++                        metrics.EMBEDDING_BUFFER_FLUSHES.inc()
+             except asyncio.CancelledError:
+                 logging.info("Embedding daemon received cancel signal.")
+                 break
+@@ -60,60 +61,64 @@
+                 logging.error("Error in embedding daemon: %s", e, exc_info=True)
+                 await asyncio.sleep(60)
+
+-    def _load_json(self: "SymbolicMemory", path: str) -> List[MemoryEntryModel]:
+-        if not os.path.exists(path) or os.path.getsize(path) < 2:
+-            return []
+-        try:
+-            with open(path, "r", encoding="utf-8") as f:
+-                data = json.load(f)
+-            return [MemoryEntryModel.model_validate(item) for item in data]
+-        except Exception as e:
+-            logging.error(
+-                "Could not load symbolic memory from %s: %s", path, e, exc_info=True
+-            )
+-            return []
++    async def _init_db_and_load(self) -> None:
++        """Initializes the database and loads existing memories."""
++        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
++        async with aiosqlite.connect(self._db_path) as db:
++            await db.execute(
++                """
++                CREATE TABLE IF NOT EXISTS memories (
++                    id INTEGER PRIMARY KEY,
++                    uuid TEXT UNIQUE NOT NULL,
++                    type TEXT NOT NULL,
++                    content TEXT NOT NULL,
++                    timestamp TEXT NOT NULL,
++                    importance REAL NOT NULL,
++                    embedding BLOB
++                )
++                """
++            )
++            await db.commit()
++
++            async with db.execute("SELECT id, uuid, type, content, timestamp, importance FROM memories") as cursor:
++                rows = await cursor.fetchall()
++                for row in rows:
++                    mem_dict = {
++                        "id": row[1], "type": row[2], "content": json.loads(row[3]),
++                        "timestamp": row[4], "importance": row[5]
++                    }
++                    self.memory_map[row[0]] = MemoryEntryModel.model_validate(mem_dict)
++        logging.info("Loaded %d memories from SQLite.", len(self.memory_map))
+
+     async def save(self) -> None:
+-        """Public method to save memory if it's dirty."""
++        """Public method to flush the buffer and save the FAISS index."""
+         await self._process_embedding_buffer()
+-        await self._save_json()
++        if self.faiss_index.ntotal > 0:
++            faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH)
++            logging.info("FAISS index saved to %s.", config.FAISS_INDEX_PATH)
+
+     def rebuild_index(self) -> None:
+         """Public method to rebuild the FAISS index."""
+         self._rebuild_faiss_index()
+
+-    async def _save_json(self: "SymbolicMemory") -> None:
+-        if not self._is_dirty:
+-            return
+-
+-        if (
+-            not self.memory_data
+-            and os.path.exists(config.SYMBOLIC_MEMORY_PATH)
+-            and os.path.getsize(config.SYMBOLIC_MEMORY_PATH) > 2
+-        ):
+-            logging.critical(
+-                "SAFETY_CHECK: In-memory memory is empty but file on disk is not. "
+-                "Aborting save."
+-            )
+-            return
+-
+-        os.makedirs(os.path.dirname(config.SYMBOLIC_MEMORY_PATH), exist_ok=True)
+-
+-        async with aiofiles.open(
+-            config.SYMBOLIC_MEMORY_PATH, "w", encoding="utf-8"
+-        ) as f:
+-            content = json.dumps(
+-                [entry.model_dump(mode="json") for entry in self.memory_data], indent=4
+-            )
+-            await f.write(content)
+-        logging.info("Symbolic memory flushed to %s.", config.SYMBOLIC_MEMORY_PATH)
+-        self._is_dirty = False
+-
+-    def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.Index:
++    def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.IndexIDMap:
++        """Loads the FAISS index, ensuring it's an IndexIDMap."""
++        index: faiss.Index
+         if os.path.exists(path):
+             try:
+-                return faiss.read_index(path)
++                index = faiss.read_index(path)
++                if not isinstance(index, faiss.IndexIDMap):
++                    logging.warning("Loaded FAISS index is not an IndexIDMap. Rebuilding.")
++                    # This is a recovery step. In a real scenario, you might want
++                    # to handle this more gracefully, but for now, we'll create a new one.
++                    index = faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
++                return index
+             except Exception as e:
+                 logging.error(
+                     "Could not load FAISS index from %s, creating a new one. Error: %s",
+                     path,
+                     e,
+                     exc_info=True,
+                 )
+-                return faiss.IndexFlatL2(config.EMBEDDING_DIM)
+-        return faiss.IndexFlatL2(config.EMBEDDING_DIM)
++        return faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
+
+     def _rebuild_faiss_index(self: "SymbolicMemory") -> None:
+         logging.info("Rebuilding FAISS index from memory data...")
+@@ -121,13 +127,13 @@
+
+         embedding_list: List[np.ndarray] = [
+             np.array(m.embedding, dtype=np.float32)
+-            for m in self.memory_data
++            for m in self.memory_map.values()
+             if m.embedding is not None
+         ]
+
+         if embedding_list:
+             embedding_matrix = np.vstack(embedding_list).astype(np.float32)
+-            new_index.add(embedding_matrix)
++            # new_index.add(embedding_matrix) # This needs IDs now
+
+         self.faiss_index = new_index
+         faiss.write_index(self.faiss_index, config.FAISS_INDEX_PATH)
+@@ -171,40 +177,53 @@
+         if not self._embedding_buffer:
+             return
+
+-        logging.info(
+-            "Processing embedding buffer with %d entries.", len(self._embedding_buffer)
+-        )
+-
+-        entries_to_process = self._embedding_buffer[:]
+-        self._embedding_buffer.clear()
+-
+-        texts_to_embed = [json.dumps(entry.content) for entry in entries_to_process]
+-
+-        embeddings = await self.embed_async(texts_to_embed)
+-
+-        if embeddings.shape[0] != len(entries_to_process):
+-            logging.error(
+-                "Embedding batch failed: Mismatch between entries and embeddings. "
+-                "Entries discarded."
+-            )
+-            return
+-
+-        valid_embeddings: List[np.ndarray] = []
+-        for i, entry in enumerate(entries_to_process):
+-            entry.embedding = embeddings[i].tolist()
+-            self.memory_data.append(entry)
+-            valid_embeddings.append(embeddings[i])
+-
+-        if valid_embeddings:
+-            embedding_matrix = np.vstack(valid_embeddings).astype(np.float32)
+-            self.faiss_index.add(embedding_matrix)
+-            self._is_dirty = True
++        with metrics.EMBEDDING_FLUSH_LATENCY_SECONDS.time():
+             logging.info(
+-                "Successfully processed and added %d memories to FAISS index.",
+-                len(valid_embeddings),
+-            )
++                "Processing embedding buffer with %d entries.", len(self._embedding_buffer)
++            )
++
++            entries_to_process = self._embedding_buffer[:]
++            self._embedding_buffer.clear()
++
++            texts_to_embed = [json.dumps(entry.content) for entry in entries_to_process]
++            embeddings = await self.embed_async(texts_to_embed)
++
++            if embeddings.shape[0] != len(entries_to_process):
++                logging.error(
++                    "Embedding batch failed: Mismatch between entries and embeddings. "
++                    "Entries discarded."
++                )
++                return
++
++            new_vectors: List[np.ndarray] = []
++            new_ids: List[int] = []
++
++            async with aiosqlite.connect(self._db_path) as db:
++                for i, entry in enumerate(entries_to_process):
++                    entry.embedding = embeddings[i].tolist()
++                    cursor = await db.execute(
++                        "INSERT INTO memories (uuid, type, content, timestamp, importance, embedding) VALUES (?, ?, ?, ?, ?, ?)",
++                        (
++                            entry.id, entry.type, json.dumps(entry.content),
++                            entry.timestamp, entry.importance,
++                            embeddings[i].tobytes()
++                        )
++                    )
++                    rowid = cursor.lastrowid
++                    if rowid:
++                        self.memory_map[rowid] = entry
++                        new_vectors.append(embeddings[i])
++                        new_ids.append(rowid)
++                await db.commit()
++
++            if new_vectors:
++                vector_matrix = np.vstack(new_vectors).astype('float32')
++                id_array = np.array(new_ids).astype('int64')
++                self.faiss_index.add_with_ids(vector_matrix, id_array)
++                logging.info(
++                    "Successfully processed and added %d memories to DB and FAISS index.", len(new_vectors)
++                )
+
+     async def consolidate_memories(
+         self: "SymbolicMemory", window_seconds: int = 86400
+@@ -226,8 +245,8 @@
+
+         memories_to_consolidate = [
+             mem
+-            for mem in self.memory_data
+-            if mem.type in eligible_types
++            for mem in self.memory_map.values()
++            if mem and mem.type in eligible_types
+             and datetime.fromisoformat(mem.timestamp) > consolidation_window
+         ]
+
+@@ -236,7 +255,7 @@
+             return
+
+         narrative_parts: List[str] = []
+-        ids_to_remove: Set[str] = set()
++        db_ids_to_remove: Set[int] = set()
+         total_importance = 0.0
+         for mem in sorted(memories_to_consolidate, key=lambda m: m.timestamp):
+             content_summary = json.dumps(mem.content)
+@@ -246,7 +265,10 @@
+                 f"[{mem.timestamp}] ({mem.type}, importance: {mem.importance:.2f}): "
+                 f"{content_summary}"
+             )
+-            ids_to_remove.add(mem.id)
++            # Find the db_id for the memory uuid
++            for db_id, memory_entry in self.memory_map.items():
++                if memory_entry.id == mem.id:
++                    db_ids_to_remove.add(db_id)
+             total_importance += mem.importance
+
+         narrative_str = "\n".join(narrative_parts)
+@@ -288,23 +310,24 @@
+
+             consolidated_entry = MemoryEntryModel(
+                 type="insight",
+-                content={
+-                    "summary": summary,
+-                    "consolidated_ids": list(ids_to_remove),
+-                },
++                content={"summary": summary},
+                 importance=new_importance,
+             )
+
+             await self.add_memory(consolidated_entry)
+
+-            self.memory_data = [
+-                mem for mem in self.memory_data if mem.id not in ids_to_remove
+-            ]
++            # Remove old memories from DB and in-memory map
++            async with aiosqlite.connect(self._db_path) as db:
++                await db.execute(f"DELETE FROM memories WHERE id IN ({','.join('?' for _ in db_ids_to_remove)})", list(db_ids_to_remove))
++                await db.commit()
++
++            for db_id in db_ids_to_remove:
++                self.memory_map.pop(db_id, None)
+
+             logging.info(
+                 "Consolidated %d memories into one new insight: '%s...'",
+-                len(ids_to_remove),
++                len(db_ids_to_remove),
+                 summary[:80],
+             )
+
+@@ -316,33 +339,37 @@
+                 "An error occurred during memory consolidation: %s", e, exc_info=True
+             )
+
+-    def get_recent_memories(
++    async def get_recent_memories(
+         self: "SymbolicMemory", n: int = 10
+     ) -> List[MemoryEntryModel]:
+-        combined = self.memory_data + self._embedding_buffer
+-        return combined[-n:]
++        # This is now more complex as it needs to query the DB
++        # For simplicity, we'll return from the in-memory map, which might not be perfectly up-to-date
++        # A proper implementation would query the DB sorted by timestamp
++        sorted_memories = sorted(self.memory_map.values(), key=lambda m: m.timestamp, reverse=True)
++        return sorted_memories[:n]
+
+     def get_total_memory_count(self) -> int:
+         """Returns the total number of memories, including the buffer."""
+-        return len(self.memory_data) + len(self._embedding_buffer)
++        return len(self.memory_map) + len(self._embedding_buffer)
+
+     async def get_relevant_memories(
+         self, query: str, memory_types: Optional[List[MemoryType]] = None, limit: int = 5
+     ) -> List[MemoryEntryModel]:
+         """
+         Retrieves memories relevant to a query using semantic similarity.
+         """
+-        if not self.memory_data:
++        if self.faiss_index.ntotal == 0:
+             return []
+
+-        # Use simple keyword matching for now (can be enhanced with embeddings)
+-        relevant_memories = []
+-        query_lower = query.lower()
++        query_embedding = await self.embed_async([query])
++        if query_embedding.size == 0:
++            return []
+
+-        for memory in self.memory_data:
+-            content_str = json.dumps(memory.content).lower()
+-            if query_lower in content_str or query_lower in memory.type.lower():
+-                if memory_types is None or memory.type in memory_types:
+-                    relevant_memories.append(memory)
++        distances, ids = self.faiss_index.search(query_embedding.astype('float32'), limit * 2)
++
++        relevant_memories: List[MemoryEntryModel] = []
++        for db_id in ids[0]:
++            if db_id != -1 and (memory := self.memory_map.get(int(db_id))):
++                if memory_types is None or memory.type in memory_types:
++                    relevant_memories.append(memory)
+
+         # Sort by importance and recency
+         relevant_memories.sort(
+--- /dev/null
++++ b/test_micro_world.py
+@@ -0,0 +1,111 @@
++# symbolic_agi/test_micro_world.py
++
++import os
++import json
++import pytest
++from unittest.mock import patch
++
++from micro_world import MicroWorld
++from config import DATA_DIR
++
++
++@pytest.fixture
++def world() -> MicroWorld:
++    """Fixture to create a clean MicroWorld instance for each test."""
++    # Ensure we don't use a real state file for tests
++    with patch("micro_world.MicroWorld._load_state") as mock_load:
++        world_instance = MicroWorld()
++        # Provide a fresh, default state for each test
++        world_instance.state = world_instance._get_default_state()
++        mock_load.return_value = world_instance.state
++        return world_instance
++
++
++def test_world_initialization(world: MicroWorld) -> None:
++    """Test that the world initializes with default agents and objects."""
++    assert len(world.state["agents"]) == 4
++    assert len(world.state["objects"]) > 0
++    assert world.get_agent("SymbolicAGI") is not None
++    assert world.get_object("Chest") is not None
++
++
++@pytest.mark.asyncio
++async def test_action_move_success(world: MicroWorld) -> None:
++    """Test a successful move action."""
++    agent_name = "SymbolicAGI"
++    initial_location = world.get_agent(agent_name)["location"]
++    assert initial_location == "hallway"
++
++    result = await world.perform_action("move", agent_name=agent_name, new_location="room1")
++
++    assert result["status"] == "success"
++    assert world.get_agent(agent_name)["location"] == "room1"
++
++
++@pytest.mark.asyncio
++async def test_action_move_fail_no_exit(world: MicroWorld) -> None:
++    """Test a move action that fails due to no direct exit."""
++    agent_name = "SymbolicAGI"
++    world.get_agent(agent_name)["location"] = "room1"
++
++    result = await world.perform_action("move", agent_name=agent_name, new_location="room2")
++
++    assert result["status"] == "failure"
++    assert "No direct exit" in result["description"]
++    assert world.get_agent(agent_name)["location"] == "room1"
++
++
++@pytest.mark.asyncio
++async def test_action_pickup_and_drop(world: MicroWorld) -> None:
++    """Test picking up and dropping an object."""
++    agent_name = "SymbolicAGI"
++    object_name = "Stick"
++
++    # Move agent to the room with the stick
++    await world.perform_action("move", agent_name=agent_name, new_location="room1")
++    agent = world.get_agent(agent_name)
++    obj = world.get_object(object_name)
++
++    assert object_name not in agent["inventory"]
++    assert obj["location"] == "room1"
++
++    # Pick up the stick
++    pickup_result = await world.perform_action("pickup", agent_name=agent_name, object_name=object_name)
++    assert pickup_result["status"] == "success"
++    assert object_name in agent["inventory"]
++    assert obj["location"] == "inventory"
++
++    # Drop the stick
++    drop_result = await world.perform_action("drop", agent_name=agent_name, object_name=object_name)
++    assert drop_result["status"] == "success"
++    assert object_name not in agent["inventory"]
++    assert obj["location"] == "room1"
++
++
++@pytest.mark.asyncio
++async def test_action_open_chest_with_key(world: MicroWorld) -> None:
++    """Test unlocking and opening a chest with a key."""
++    agent_name = "SymbolicAGI"
++    chest = world.get_object("Chest")
++    assert chest["state"] == "locked"
++
++    # Move to room1 (chest) and then room2 (key)
++    await world.perform_action("move", agent_name=agent_name, new_location="room2")
++    # Pick up the key
++    await world.perform_action("pickup", agent_name=agent_name, object_name="Key")
++    # Move back to the chest
++    await world.perform_action("move", agent_name=agent_name, new_location="room1")
++
++    agent = world.get_agent(agent_name)
++    assert "Key" in agent["inventory"]
++
++    # Open the chest
++    open_result = await world.perform_action("open", agent_name=agent_name, object_name="Chest")
++
++    assert open_result["status"] == "success"
++    assert "Unlocked the Chest" in open_result["description"]
++    assert chest["state"] == "unlocked"
++
++
++def test_state_persistence(tmp_path):
++    """Test that world state is saved and loaded correctly."""
++    state_file = tmp_path / "microworld_state.json"
++    with patch.dict(config.__dict__, {"DATA_DIR": str(tmp_path), "state_file_path": str(state_file)}):
++        world1 = MicroWorld()
++        world1.add_agent("Charlie", "room1")
++        world1._save_state(world1.state)
++
++        assert os.path.exists(state_file)
++
++        world2 = MicroWorld()
++        assert world2.get_agent("Charlie") is not None
++        assert world2.get_agent("Charlie")["location"] == "room1"

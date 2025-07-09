@@ -7,7 +7,7 @@ import os
 from typing import Any, cast
 
 from openai import APIError, AsyncOpenAI
-from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.create_embedding_response import CreateEmbeddingResponse
 
 from . import config, metrics
@@ -42,7 +42,7 @@ async def monitored_chat_completion(role: str, **kwargs: Any) -> ChatCompletion:
     try:
         with metrics.API_CALL_LATENCY.labels(model=model_to_use).time():
             response = cast(
-                ChatCompletion,
+                "ChatCompletion",
                 await client.chat.completions.create(model=model_to_use, **kwargs),
             )
 

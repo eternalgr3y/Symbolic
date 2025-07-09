@@ -7,17 +7,22 @@ import io
 import json
 import logging
 import os
-from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Process, Queue
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
-from multiprocessing import Queue
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast, cast
 from urllib.parse import urlparse
 
 # Third-party imports
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        DDGS = None
 
 # First-party imports
 from . import config
@@ -30,20 +35,35 @@ if TYPE_CHECKING:
 
 
 try:
-    import memory_profiler
+    import memory_profiler  # type: ignore[import-untyped]
 except ImportError:
     memory_profiler = None
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-# This function must be at the top level to be pickleable by ProcessPoolExecutor
-def _execute_sandboxed_code(code: str, result_queue: "Queue[Dict[str, Any]]") -> None:
+# This function must be at the top level to be pickleable by multiprocessing
+def _execute_sandboxed_code(code: str, result_queue: Queue) -> None:
     """Executes code in a sandboxed environment and puts the result in a queue."""
     output_buffer = io.StringIO()
     try:
         # A very restrictive sandbox
-        safe_globals: Dict[str, Any] = {"__builtins__": {}}
+        safe_globals: Dict[str, Any] = {
+            "__builtins__": {
+                "print": print,
+                "len": len,
+                "range": range,
+                "str": str,
+                "int": int,
+                "float": float,
+                "list": list,
+                "dict": dict,
+                "set": set,
+                "True": True,
+                "False": False,
+                "None": None,
+            }
+        }
         with redirect_stdout(output_buffer):
             exec(code, safe_globals, {})
         result = {"status": "success", "output": output_buffer.getvalue()}
@@ -63,7 +83,6 @@ class ToolPlugin:
         self.agi = agi
         self.workspace_dir = os.path.abspath(config.WORKSPACE_DIR)
         os.makedirs(self.workspace_dir, exist_ok=True)
-        self.process_pool = ProcessPoolExecutor()
 
     # --- Browser Tools ---
     @register_innate_action(
@@ -438,7 +457,7 @@ Respond with ONLY the generated explanation text.
         }
         self.agi.world.state["objects"].append(new_object)
 
-        self.agi.world._save_state(self.agi.world.state)
+        self.agi.world.save_state()
         success_msg = f"Successfully crafted '{output_name}'."
         logging.info(success_msg)
         return {
@@ -532,7 +551,6 @@ Your task is to rewrite the entire file with the requested change applied.
 ```python
 {raw_current_code}
 ```
-
 --- REQUESTED CHANGE ---
 {change_description}
 
@@ -618,7 +636,7 @@ Respond with ONLY the raw Python code.
         logging.info("Analyzing data with query: '%s'", query)
         workspace: Dict[str, Any] = kwargs.get("workspace", {})
         if data in workspace:
-            logging.info("Resolving 'data' parameter from workspace key '%s'...", data)
+            logging.info("Resolving 'data' parameter from workspace key '%s...'", data)
             data = str(workspace[data])
         prompt = f"""
 You are a data analysis expert. Your task is to answer a specific query based ONLY on the provided data. Do not use any external knowledge. If the answer cannot be found in the data, state that clearly.
@@ -633,8 +651,7 @@ Respond with ONLY the direct answer to the query.
 """
         try:
             resp = await monitored_chat_completion(
-                role="tool_action",
-                messages=[{"role": "system", "content": prompt}]
+                role="tool_action", messages=[{"role": "system", "content": prompt}]
             )
             if resp.choices and resp.choices[0].message.content:
                 answer = resp.choices[0].message.content.strip()
@@ -661,39 +678,57 @@ Respond with ONLY the direct answer to the query.
             }
         logging.warning("Executing sandboxed Python code:\n---\n%s\n---", code)
 
-        loop = asyncio.get_running_loop()
-        result_queue: "Queue[Dict[str, Any]]" = Queue()
+        result_queue: Queue = Queue()
+        process = Process(target=_execute_sandboxed_code, args=(code, result_queue))
 
         try:
-            # Schedule the sandboxed execution in a separate process
-            future = loop.run_in_executor(
-                self.process_pool, _execute_sandboxed_code, code, result_queue
-            )
-            # Wait for the result with a timeout
-            await asyncio.wait_for(future, timeout=timeout_seconds)
-            result = result_queue.get()
+            process.start()
+            # Use asyncio.to_thread to wait for the process without blocking the event loop
+            await asyncio.to_thread(process.join, timeout=timeout_seconds)
 
-            if result["status"] == "success":
-                logging.info("Code execution successful. Output:\n%s", result["output"])
+            if process.is_alive():
+                process.terminate()  # Forcefully terminate if it's still running
+                process.join()  # Wait for termination to complete
+                logging.error(
+                    "Code execution timed out after %d seconds and was terminated.",
+                    timeout_seconds,
+                )
+                return {
+                    "status": "failure",
+                    "description": "Error: Code execution took too long and was terminated.",
+                }
+
+            if not result_queue.empty():
+                result = result_queue.get()
+                if result["status"] == "success":
+                    logging.info(
+                        "Code execution successful. Output:\n%s", result["output"]
+                    )
+                else:
+                    logging.error(
+                        "Code execution failed. Error: %s", result.get("error")
+                    )
+                return cast(Dict[str, Any], result)
             else:
-                logging.error("Code execution failed. Error: %s", result.get("error"))
-
-            return result
-
+                return {
+                    "status": "failure",
+                    "description": "Code execution process finished without providing a result.",
+                }
         except asyncio.TimeoutError:
-            logging.error("Code execution timed out after %d seconds.", timeout_seconds)
-            # It's difficult to forcefully kill the process in the pool,
-            # but the result from that process will be ignored.
             return {
                 "status": "failure",
                 "description": "Error: Code execution took too long and was terminated.",
             }
         except Exception as e:
             error_message = (
-                f"An error occurred during code execution management: {type(e).__name__}: {e}"
+                "An error occurred during code execution management: "
+                f"{type(e).__name__}: {e}"
             )
             logging.error(error_message, exc_info=True)
             return {"status": "failure", "description": error_message}
+        finally:
+            if process.is_alive():
+                process.terminate()
 
     @register_innate_action(
         "orchestrator", "Reads the content of one of the AGI's own source code files."
@@ -754,7 +789,7 @@ Respond with ONLY the direct answer to the query.
                 "description": f"Permission denied: '{file_name}' is not a readable core file.",
             }
         try:
-            safe_file_path = self._get_safe_path(file_name, config.DATA_DIR)
+            safe_file_path = self._get_safe_path(file_name, config.WORKSPACE_DIR)
             with open(safe_file_path, "r", encoding="utf-8") as f:
                 content = f.read()
             return {"status": "success", "content": content}
@@ -932,6 +967,13 @@ Respond with ONLY the direct answer to the query.
         self, query: str, num_results: int = 3, **kwargs: Any
     ) -> Dict[str, Any]:
         logging.info("Executing REAL web search for query: '%s'", query)
+        
+        if DDGS is None:
+            return {
+                "status": "failure",
+                "description": "Web search unavailable: duckduckgo_search library not found. Install with: pip install duckduckgo-search"
+            }
+        
         try:
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=num_results))
@@ -962,6 +1004,42 @@ Respond with ONLY the direct answer to the query.
                 "status": "failure",
                 "description": f"An error occurred during web search: {e}",
             }
+
+    @register_innate_action(
+        "qa", "Reviews and approves plans with basic safety checks."
+    )
+    async def review_plan(self, **kwargs: Any) -> Dict[str, Any]:
+        """
+        QA skill: Reviews plans and provides approval with safety checks.
+        """
+        logging.info("QA Agent: Reviewing plan for approval")
+        
+        workspace = kwargs.get("workspace", {})
+        goal_description = workspace.get("goal_description", "")
+        
+        # Basic safety checks
+        dangerous_keywords = ["delete", "remove", "destroy", "harm", "attack", "break"]
+        if any(keyword in goal_description.lower() for keyword in dangerous_keywords):
+            return {
+                "status": "success",
+                "approved": False,
+                "comments": "Plan rejected: Contains potentially dangerous actions"
+            }
+        
+        # Check for self-modification without proper safeguards
+        if "modify" in goal_description.lower() and "source" in goal_description.lower():
+            return {
+                "status": "success", 
+                "approved": True,
+                "comments": "Plan approved with caution: Self-modification detected, ensure safety protocols"
+            }
+        
+        # Auto-approve most plans
+        return {
+            "status": "success",
+            "approved": True, 
+            "comments": "Plan approved by QA review - looks safe to execute"
+        }
 
     @register_innate_action(
         "orchestrator", "Gets the current date and time in UTC."

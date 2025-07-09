@@ -1,13 +1,14 @@
 # symbolic_agi/run_agi.py
 
 import asyncio
-import atexit
 import logging
 import logging.handlers
 import signal
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import colorlog
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
 from prometheus_client import start_http_server
 
 from . import metrics
@@ -17,6 +18,7 @@ from .api_client import client
 from .schemas import AGIConfig, GoalMode, GoalModel
 
 SHUTDOWN_EVENT = asyncio.Event()
+app = FastAPI(title="SymbolicAGI Control Plane")
 
 
 def setup_logging(log_level: str = "INFO") -> None:
@@ -58,146 +60,108 @@ def setup_logging(log_level: str = "INFO") -> None:
     root_logger.addHandler(console_handler)
 
 
-async def main() -> None:  # noqa: C901
-    """Initializes the AGI and runs the main interactive/autonomous loop."""
-    agi: Optional[SymbolicAGI] = None
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Initializes the AGI and starts background tasks."""
+    setup_logging()
+    logging.info("=" * 50)
+    logging.info("--- INITIALIZING SYMBOLIC AGI SYSTEM (PERSISTENT MODE) ---")
 
-    async def autonomous_loop(agi_instance: SymbolicAGI) -> None:
-        """The main cognitive heartbeat of the AGI."""
-        while not SHUTDOWN_EVENT.is_set():
-            try:
-                metrics.ACTIVE_GOALS.set(len(agi_instance.ltm.goals))
-                metrics.AGENT_TASKS_RUNNING.set(len(agi_instance.agent_tasks))
-                metrics.MEMORY_ENTRIES.set(
-                    agi_instance.memory.get_total_memory_count()
-                )
-                if agi_instance.memory.faiss_index:
-                    metrics.FAISS_INDEX_VECTORS.set(
-                        agi_instance.memory.faiss_index.ntotal
-                    )
+    start_http_server(9090)
+    logging.info("Prometheus metrics server started on port 9090.")
 
-                if active_goal := agi_instance.ltm.get_active_goal():
-                    logging.info(
-                        "[Cycle] Working on goal: '%s'...", active_goal.description
-                    )
+    agi = await SymbolicAGI.create()
+    await agi.start_background_tasks()
+    app.state.agi = agi
 
-                    result = (
-                        await agi_instance.execution_unit.handle_autonomous_cycle()
-                    )
+    specialist_definitions = [
+        {"name": f"{agi.name}_Coder_0", "persona": "coder"},
+        {"name": f"{agi.name}_Research_0", "persona": "research"},
+        {"name": f"{agi.name}_QA_0", "persona": "qa"},
+        {"name": f"{agi.name}_Browser_0", "persona": "browser"},
+    ]
 
-                    status_message = result.get("description", "Cycle finished.")
-                    logging.info("[Cycle] Status: %s", status_message)
-
-                    if response_text := result.get("response_text"):
-                        print(f"\nAGI: {response_text}\n")
-
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                logging.info("Autonomous loop cancelled.")
-                break
-            except Exception as e:
-                logging.critical(
-                    "CRITICAL ERROR in autonomous loop: %s", e, exc_info=True
-                )
-                await asyncio.sleep(15)
-
-    async def user_input_loop(agi_instance: SymbolicAGI) -> None:
-        """Handles user input to create new goals."""
-        loop = asyncio.get_event_loop()
-        while not SHUTDOWN_EVENT.is_set():
-            try:
-                user_input = await loop.run_in_executor(
-                    None,
-                    lambda: input("Enter a new goal (or press Ctrl+C to exit):\n> "),
-                )
-                if user_input.strip():
-                    goal_mode: GoalMode = (
-                        "docs" if "document" in user_input.lower() else "code"
-                    )
-                    new_goal = GoalModel(
-                        description=user_input.strip(), sub_tasks=[], mode=goal_mode
-                    )
-                    agi_instance.ltm.add_goal(new_goal)
-                    logging.info(
-                        "Goal '%s' has been added to the queue (Mode: %s).",
-                        new_goal.description,
-                        goal_mode,
-                    )
-            except (EOFError, asyncio.CancelledError):
-                break
-
-    def shutdown_handler(signum: Optional[int] = None, frame: Optional[object] = None) -> None:
-        """Initiates a graceful shutdown."""
-        if SHUTDOWN_EVENT.is_set():
-            return
-        logging.critical("Shutdown signal received. Initiating graceful shutdown...")
-        SHUTDOWN_EVENT.set()
-
-    # Register shutdown handlers
-    atexit.register(shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
-    try:
-        setup_logging()
-        logging.info("=" * 50)
-        logging.info("--- INITIALIZING SYMBOLIC AGI SYSTEM (PERSISTENT MODE) ---")
-
-        start_http_server(8000)
-        logging.info("Prometheus metrics server started on port 8000.")
-
-        agi = SymbolicAGI()
-        await agi.startup_validation()
-        await agi.start_background_tasks()
-
-        specialist_definitions = [
-            {"name": f"{agi.name}_Coder_0", "persona": "coder"},
-            {"name": f"{agi.name}_Research_0", "persona": "research"},
-            {"name": f"{agi.name}_QA_0", "persona": "qa"},
-            {"name": f"{agi.name}_Browser_0", "persona": "browser"},
-        ]
-
-        for agent_def in specialist_definitions:
-            specialist_agent = Agent(
-                name=agent_def["name"],
-                message_bus=agi.message_bus,
-                api_client=client,
-            )
-            agi.agent_pool.add_agent(
-                name=agent_def["name"],
-                persona=agent_def["persona"],
-                memory=agi.memory,
-            )
-            task = asyncio.create_task(specialist_agent.run())
-            agi.agent_tasks.append(task)
-
-        logging.info("--- %d SPECIALIST AGENTS ONLINE ---", len(agi.agent_tasks))
-        logging.info("--- AGI CORE ONLINE. NOW FULLY AUTONOMOUS & PERSISTENT. ---")
-        logging.info(
-            "You can enter a new goal at any time. If idle, the AGI may generate its own."
+    for agent_def in specialist_definitions:
+        specialist_agent = Agent(
+            name=agent_def["name"],
+            message_bus=agi.message_bus,
+            api_client=client,
         )
-        logging.info("=" * 50 + "\n")
+        agi.agent_pool.add_agent(
+            name=agent_def["name"],
+            persona=agent_def["persona"],
+            memory=agi.memory,
+        )
+        task = asyncio.create_task(specialist_agent.run())
+        agi.agent_tasks.append(task)
 
-        main_tasks = [
-            asyncio.create_task(autonomous_loop(agi)),
-            asyncio.create_task(user_input_loop(agi)),
-        ]
-        await asyncio.gather(*main_tasks, return_exceptions=True)
+    logging.info("--- %d SPECIALIST AGENTS ONLINE ---", len(agi.agent_tasks))
+    logging.info("--- AGI CORE ONLINE. CONTROL PLANE LISTENING ON PORT 8000. ---")
+    logging.info("Submit new goals via POST to http://localhost:8000/goal")
+    logging.info("=" * 50 + "\n")
 
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        logging.info("\n--- User initiated shutdown (Ctrl+C). ---")
-    except Exception:
-        logging.critical("A critical error occurred in the main runner:", exc_info=True)
-    finally:
-        SHUTDOWN_EVENT.set()
-        if agi:
-            await agi.shutdown()
 
+@app.on_event("shutdown")
+async def shutdown_event_handler() -> None:
+    """Handles graceful shutdown of the AGI."""
+    if hasattr(app.state, "agi") and app.state.agi:
+        logging.info("Shutting down AGI controller and agents...")
+        await app.state.agi.shutdown()
         logging.info("All agents have been shut down.")
 
 
+@app.get("/health")
+async def health_check() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/goals")
+async def get_goals(request: Request) -> List[Dict[str, Any]]:
+    """Lists all current goals."""
+    agi_instance: SymbolicAGI = request.app.state.agi
+    return [g.model_dump(exclude={'sub_tasks'}) for g in agi_instance.ltm.goals.values()]
+
+
+@app.get("/skills")
+async def get_skills(request: Request) -> List[Dict[str, Any]]:
+    """Lists all learned skills."""
+    agi_instance: SymbolicAGI = request.app.state.agi
+    return [s.model_dump(exclude={'action_sequence'}) for s in agi_instance.skills.skills.values()]
+
+
+@app.post("/goal", status_code=202)
+async def create_goal(
+    request: Request, body: Dict[str, Any]
+) -> Dict[str, str]:
+    """Accepts a new goal for the AGI."""
+    agi_instance: SymbolicAGI = request.app.state.agi
+    goal_description = body.get("description")
+    if not goal_description:
+        raise HTTPException(status_code=400, detail="`description` is required.")
+
+    goal_mode: GoalMode = (
+        "docs" if "document" in goal_description.lower() else "code"
+    )
+    new_goal = GoalModel(
+        description=goal_description.strip(), sub_tasks=[], mode=goal_mode
+    )
+    await agi_instance.ltm.add_goal(new_goal)
+    logging.info(
+        "New goal added via API: '%s' (Mode: %s).",
+        new_goal.description,
+        goal_mode,
+    )
+    return {"status": "accepted", "goal_id": new_goal.id}
+
+
+def run_agi() -> None:
+    """Configures and runs the Uvicorn server."""
+    uvicorn_config = uvicorn.Config(
+        "symbolic_agi.run_agi:app", host="0.0.0.0", port=8000, log_level="warning"
+    )
+    server = uvicorn.Server(uvicorn_config)
+    server.run()
+
+
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nShutdown requested by user.")
+    run_agi()

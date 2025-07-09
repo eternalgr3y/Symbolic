@@ -2,7 +2,9 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
+
+from pydantic import TypeAdapter, ValidationError
 
 from .agent_pool import DynamicAgentPool
 from .recursive_introspector import RecursiveIntrospector
@@ -30,13 +32,13 @@ class Planner:
         self.tools = tool_plugin
 
     async def _validate_and_repair_plan(
-        self, plan: List[Dict[str, Any]], goal_description: str
-    ) -> List[Dict[str, Any]]:
+        self, plan: list[dict[str, Any]], goal_description: str
+    ) -> list[dict[str, Any]]:
         """
         Validates that each step in a plan has a valid action for its assigned persona.
         If not, it provides feedback for replanning.
         """
-        invalid_steps: List[str] = []
+        invalid_steps: list[str] = []
         all_innate_actions = {action.name for action in self.skills.innate_actions}
 
         for i, step in enumerate(plan):
@@ -44,7 +46,7 @@ class Planner:
             persona = step.get("assigned_persona")
             if not action or not persona:
                 invalid_steps.append(
-                    f"Step {i+1} is missing 'action' or 'assigned_persona'."
+                    f"Step {i + 1} is missing 'action' or 'assigned_persona'."
                 )
                 continue
 
@@ -56,7 +58,7 @@ class Planner:
 
             if not is_valid_action:
                 invalid_steps.append(
-                    f"Step {i+1}: Action '{action}' is not a valid action."
+                    f"Step {i + 1}: Action '{action}' is not a valid action."
                 )
 
         if invalid_steps:
@@ -71,16 +73,14 @@ class Planner:
         goal_description: str,
         file_manifest: str,
         mode: GoalMode = "code",
-        failure_context: Optional[Dict[str, Any]] = None,
-        refinement_feedback: Optional[Dict[str, Any]] = None,
+        failure_context: dict[str, Any] | None = None,
+        refinement_feedback: dict[str, Any] | None = None,
     ) -> PlannerOutput:
         """
         Uses an LLM to generate or refine a plan, then validates and repairs it.
         """
         all_actions = self.agent_pool.get_all_action_definitions()
-        available_capabilities_json = json.dumps(
-            [action.model_dump() for action in all_actions], indent=2
-        )
+        available_capabilities_json = json.dumps(all_actions, indent=2)
 
         response_format = (
             '{"thought": "...", "plan": [{"action": "...", "parameters": {}, '
@@ -175,7 +175,7 @@ You are a master project manager AGI. Your task is to decompose a high-level
 goal into a series of concrete, logical steps.
 
 # GOAL MODE: {mode.upper()}
-{docs_mode_instruction if mode == 'docs' else ''}
+{docs_mode_instruction if mode == "docs" else ""}
 
 # AVAILABLE CAPABILITIES (JSON format)
 {available_capabilities_json}
@@ -206,7 +206,7 @@ Goal: "{goal_description}"
 3.  **Respond**: Format your entire response as a single JSON object: {response_format}
 """
         plan_str = ""
-        planner_output_dict: Optional[Dict[str, Any]] = None
+        planner_output_dict: dict[str, Any] | None = None
         for attempt in range(2):
             try:
                 if attempt == 0:
@@ -249,9 +249,7 @@ FIX THIS. Respond ONLY with the corrected, raw JSON object in the format {respon
             return PlannerOutput(thought="Planner returned no output.", plan=[])
 
         thought = planner_output_dict.get("thought", "No thought recorded.")
-        raw_plan_steps = cast(
-            List[Dict[str, Any]], planner_output_dict.get("plan", [])
-        )
+        raw_plan_steps = cast("list[dict[str, Any]]", planner_output_dict.get("plan", []))
 
         repaired_plan_steps = await self._validate_and_repair_plan(
             raw_plan_steps, goal_description
@@ -279,10 +277,11 @@ FIX THIS. Respond ONLY with the corrected, raw JSON object in the format {respon
                 )
 
         try:
-            validated_plan = [
-                ActionStep.model_validate(item) for item in repaired_plan_steps
-            ]
-        except Exception as e:
+            ActionStepListValidator = TypeAdapter(list[ActionStep])
+            validated_plan = ActionStepListValidator.validate_python(
+                repaired_plan_steps
+            )
+        except ValidationError as e:
             logging.error(
                 "Failed to validate repaired plan structure: %s", e, exc_info=True
             )

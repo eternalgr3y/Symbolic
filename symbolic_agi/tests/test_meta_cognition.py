@@ -1,7 +1,10 @@
+# symbolic_agi/tests/test_meta_cognition.py
+
 """Test module for MetaCognition functionality."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from symbolic_agi.meta_cognition import MetaCognitionUnit
 
@@ -18,7 +21,9 @@ async def test_meta_cognition_basic() -> None:
 async def test_generate_goal_from_drives_mock() -> None:
     """Test goal generation using mocked methods."""
     mock_agi = MagicMock()
-    with patch.object(MetaCognitionUnit, "generate_goal_from_drives", new_callable=AsyncMock):
+    with patch.object(
+        MetaCognitionUnit, "generate_goal_from_drives", new_callable=AsyncMock
+    ):
         meta_cognition = MetaCognitionUnit(mock_agi)
         # This will use the mocked version, avoiding attribute access issues
         await meta_cognition.generate_goal_from_drives()

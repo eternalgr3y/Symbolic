@@ -1,10 +1,13 @@
 # symbolic_agi/symbolic_identity.py
 
+import asyncio
 import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, cast
+from typing import Any
+
+import aiosqlite
 
 from . import config
 from .schemas import MemoryEntryModel
@@ -17,24 +20,21 @@ class SymbolicIdentity:
     """
 
     def __init__(
-        self: "SymbolicIdentity",
+        self,
         memory: SymbolicMemory,
-        file_path: str = config.IDENTITY_PROFILE_PATH,
+        db_path: str = config.DB_PATH,
     ):
         self.memory = memory
-        self.file_path = file_path
+        self._db_path = db_path
+        self._save_lock = asyncio.Lock()
 
-        profile = self._load_profile()
-        self.name: str = profile.get("name", "SymbolicAGI")
-        self.value_system: Dict[str, float] = profile.get(
-            "value_system",
-            {
-                "truthfulness": 1.0,
-                "harm_avoidance": 1.0,
-                "user_collaboration": 0.9,
-                "self_preservation": 0.8,
-            },
-        )
+        self.name: str = "SymbolicAGI"
+        self.value_system: dict[str, float] = {
+            "truthfulness": 1.0,
+            "harm_avoidance": 1.0,
+            "user_collaboration": 0.9,
+            "self_preservation": 0.8,
+        }
 
         self.cognitive_energy: int = 100
         self.max_energy: int = 100
@@ -43,47 +43,59 @@ class SymbolicIdentity:
         self.emotional_state: str = "curious"
         self.last_interaction_timestamp: datetime = datetime.now(timezone.utc)
 
-        self._is_dirty = False
+    @classmethod
+    async def create(
+        cls, memory: SymbolicMemory, db_path: str = config.DB_PATH
+    ) -> "SymbolicIdentity":
+        """Asynchronous factory for creating a SymbolicIdentity instance."""
+        instance = cls(memory, db_path)
+        await instance._init_db()
+        await instance._load_profile()
+        return instance
 
-    def _load_profile(self: "SymbolicIdentity") -> Dict[str, Any]:
-        """Loads the persistent identity profile from a JSON file."""
-        if os.path.exists(self.file_path):
-            try:
-                with open(self.file_path, "r") as f:
-                    return cast(Dict[str, Any], json.load(f))
-            except (json.JSONDecodeError, TypeError):
-                logging.error("Could not load identity profile, creating a new one.")
-        return {}
+    async def _init_db(self) -> None:
+        """Initializes the database and tables if they don't exist."""
+        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS identity_profile (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            await db.commit()
 
-    def save_profile(self: "SymbolicIdentity") -> None:
-        """Saves the persistent parts of the identity profile to a JSON file if changed."""
-        if not self._is_dirty:
-            return
+    async def _load_profile(self) -> None:
+        """Loads the persistent identity profile from the database."""
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute("SELECT key, value FROM identity_profile") as cursor:
+                rows = await cursor.fetchall()
+                profile_data = {row[0]: json.loads(row[1]) for row in rows}
+                self.name = profile_data.get("name", "SymbolicAGI")
+                self.value_system = profile_data.get("value_system", self.value_system)
 
-        logging.info("Saving updated identity profile to disk...")
-        try:
-            profile_data: Dict[str, Any] = {
+    async def save_profile(self) -> None:
+        """Saves the persistent parts of the identity profile to the database."""
+        async with self._save_lock:
+            logging.info("Saving updated identity profile to database.")
+            profile_data = {
                 "name": self.name,
                 "value_system": self.value_system,
             }
-            os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-            with open(self.file_path, "w") as f:
-                json.dump(profile_data, f, indent=4, default=str)
-            self._is_dirty = False
-        except Exception as e:
-            logging.error(
-                "Failed to save identity profile to %s: %s",
-                self.file_path,
-                e,
-                exc_info=True,
-            )
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.executemany(
+                    "INSERT OR REPLACE INTO identity_profile VALUES (?, ?)",
+                    [(k, json.dumps(v)) for k, v in profile_data.items()],
+                )
+                await db.commit()
 
     async def record_interaction(
         self: "SymbolicIdentity", user_input: str, agi_response: str
     ) -> None:
         """Records a conversation turn and updates the interaction timestamp."""
         self.last_interaction_timestamp = datetime.now(timezone.utc)
-        self._is_dirty = True
         await self.memory.add_memory(
             MemoryEntryModel(
                 type="user_input",
@@ -91,9 +103,10 @@ class SymbolicIdentity:
                 importance=0.7,
             )
         )
+        await self.save_profile()
 
     def update_self_model_state(
-        self: "SymbolicIdentity", updates: Dict[str, Any]
+        self: "SymbolicIdentity", updates: dict[str, Any]
     ) -> None:
         """Updates the AGI's dynamic state attributes."""
         for key, value in updates.items():
@@ -101,7 +114,7 @@ class SymbolicIdentity:
                 setattr(self, key, value)
         logging.info("Self-model state updated with: %s", updates)
 
-    def get_self_model(self: "SymbolicIdentity") -> Dict[str, Any]:
+    def get_self_model(self: "SymbolicIdentity") -> dict[str, Any]:
         """
         Dynamically constructs and returns the complete self-model.
         This is the single source of truth, preventing data duplication.
@@ -125,7 +138,7 @@ class SymbolicIdentity:
             self.cognitive_energy = min(self.max_energy, self.cognitive_energy + amount)
 
     async def record_tool_usage(
-        self: "SymbolicIdentity", tool_name: str, params: Dict[str, Any]
+        self: "SymbolicIdentity", tool_name: str, params: dict[str, Any]
     ) -> None:
         """Logs the usage of a tool."""
         await self.memory.add_memory(

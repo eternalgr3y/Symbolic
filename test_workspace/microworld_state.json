@@ -1,0 +1,99 @@
+{
+    "agents": [
+        {
+            "name": "SymbolicAGI",
+            "location": "room2",
+            "inventory": [
+                "Key"
+            ]
+        },
+        {
+            "name": "Alice",
+            "location": "room1",
+            "inventory": [
+                "Stick"
+            ]
+        },
+        {
+            "name": "Bob",
+            "location": "room2",
+            "inventory": [
+                "Rock"
+            ]
+        },
+        {
+            "name": "User",
+            "location": "hallway",
+            "inventory": []
+        }
+    ],
+    "objects": [
+        {
+            "name": "Chest",
+            "location": "room1",
+            "state": "locked",
+            "description": "A heavy wooden chest with a lock."
+        },
+        {
+            "name": "Rock",
+            "location": "room2",
+            "description": "A rough gray rock."
+        },
+        {
+            "name": "Stick",
+            "location": "room1",
+            "description": "A sturdy wooden stick."
+        },
+        {
+            "name": "Key",
+            "location": "inventory",
+            "description": "A small iron key."
+        },
+        {
+            "name": "NoticeBoard",
+            "location": "room2",
+            "description": "A faded notice board covered with old papers."
+        }
+    ],
+    "doors": [
+        {
+            "from": "hallway",
+            "to": "room1",
+            "locked": false
+        },
+        {
+            "from": "hallway",
+            "to": "room2",
+            "locked": false
+        }
+    ],
+    "rooms": [
+        "hallway",
+        "room1",
+        "room2"
+    ],
+    "events": [
+        {
+            "action": "move",
+            "params": {
+                "agent_name": "SymbolicAGI",
+                "new_location": "room2"
+            },
+            "result": {
+                "status": "success",
+                "description": "SymbolicAGI moves to room2."
+            }
+        },
+        {
+            "action": "pickup",
+            "params": {
+                "agent_name": "SymbolicAGI",
+                "object_name": "Key"
+            },
+            "result": {
+                "status": "success",
+                "description": "SymbolicAGI picked up Key."
+            }
+        }
+    ]
+}

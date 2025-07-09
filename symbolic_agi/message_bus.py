@@ -1,54 +1,99 @@
 # symbolic_agi/message_bus.py
 
 import asyncio
+import json
 import logging
-from typing import Dict, List
+from typing import Dict, Optional
 
+import redis
+import redis.asyncio as redis_async
+
+from . import config
 from .schemas import MessageModel
 
 
-class MessageBus:
-    """A central message bus for inter-agent communication using asyncio queues."""
+class RedisMessageBus:
+    """A central message bus for inter-agent communication using Redis Pub/Sub."""
 
     def __init__(self) -> None:
-        self.agent_queues: Dict[str, asyncio.Queue[MessageModel]] = {}
-        self.is_running = True
-        self.broadcast_log: List[MessageModel] = []
+        self.redis_client: redis_async.Redis = redis_async.Redis(
+            host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True
+        )
+        self.agent_queues: Dict[str, asyncio.Queue[Optional[MessageModel]]] = {}
+        self.listener_tasks: Dict[str, asyncio.Task[None]] = {}
+        self.pubsub: Optional[redis_async.client.PubSub] = None
+        self.is_running = False
 
-    def subscribe(self, agent_id: str) -> asyncio.Queue[MessageModel]:
+    async def _initialize(self) -> None:
+        if self.is_running:
+            return
+        try:
+            await self.redis_client.ping()
+            logging.info(
+                "[MessageBus] Connected to Redis at %s:%d",
+                config.REDIS_HOST,
+                config.REDIS_PORT,
+            )
+            self.pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+            self.is_running = True
+        except redis.exceptions.ConnectionError as e:
+            logging.error("[MessageBus] Could not connect to Redis: %s", e)
+            self.is_running = False
+
+    def subscribe(self, agent_id: str) -> asyncio.Queue[Optional[MessageModel]]:
         """Allows an agent to subscribe to the bus, receiving its own message queue."""
         if agent_id not in self.agent_queues:
-            self.agent_queues[agent_id] = asyncio.Queue()
+            if not self.is_running:
+                # Lazy initialization
+                asyncio.create_task(self._initialize())
+
+            queue: asyncio.Queue[Optional[MessageModel]] = asyncio.Queue()
+            self.agent_queues[agent_id] = queue
+            self.listener_tasks[agent_id] = asyncio.create_task(
+                self._listen(agent_id, queue)
+            )
             logging.info(f"[MessageBus] Agent '{agent_id}' has subscribed.")
         return self.agent_queues[agent_id]
 
+    async def _listen(self, agent_id: str, queue: asyncio.Queue[Optional[MessageModel]]) -> None:
+        """Listens for messages on a Redis channel and puts them in a queue."""
+        while not self.pubsub:
+            await asyncio.sleep(0.1) # Wait for initialization
+
+        await self.pubsub.subscribe(agent_id, "broadcast")
+        logging.debug(f"[MessageBus] Listener for '{agent_id}' started.")
+        try:
+            async for message in self.pubsub.listen():
+                if message and message["type"] == "message":
+                    data = json.loads(message["data"])
+                    msg_model = MessageModel.model_validate(data)
+                    await queue.put(msg_model)
+        except asyncio.CancelledError:
+            logging.info(f"[MessageBus] Listener for '{agent_id}' cancelled.")
+        except Exception as e:
+            logging.error(f"[MessageBus] Listener for '{agent_id}' failed: {e}", exc_info=True)
+
     async def publish(self, message: MessageModel) -> None:
         """Publishes a message to a specific agent's queue."""
-        receiver_id = message.receiver_id
-        if receiver_id in self.agent_queues:
-            await self.agent_queues[receiver_id].put(message)
-            logging.debug(
-                f"[MessageBus] Published message from '{message.sender_id}' to '{receiver_id}'."
-            )
-        else:
-            logging.warning(
-                f"[MessageBus] No agent named '{receiver_id}' is subscribed."
-            )
+        if not self.is_running:
+            await self._initialize()
+        await self.redis_client.publish(message.receiver_id, message.model_dump_json())
 
     async def broadcast(self, message: MessageModel) -> None:
         """
         Sends a message to ALL subscribed agents and logs it.
         Useful for system-wide announcements like new skills.
         """
-        self.broadcast_log.append(message)
-        logging.info(
-            f"[MessageBus] BROADCAST from '{message.sender_id}': {message.payload}"
-        )
-        for agent_id, queue in self.agent_queues.items():
-            if agent_id != message.sender_id:
-                await queue.put(message)
+        if not self.is_running:
+            await self._initialize()
+        await self.redis_client.publish("broadcast", message.model_dump_json())
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         """Initiates the shutdown of the message bus."""
-        self.is_running = False
-        logging.info("[MessageBus] Shutdown initiated.")
+        for task in self.listener_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self.listener_tasks.values(), return_exceptions=True)
+        if self.pubsub:
+            await self.pubsub.close()
+        await self.redis_client.close()
+        logging.info("[MessageBus] Shutdown complete.")

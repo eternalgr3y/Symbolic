@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from secrets import token_hex
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,10 @@ class AGIConfig(BaseModel):
     memory_forgetting_threshold: float = 0.2
     debate_timeout_seconds: int = 90
     energy_regen_amount: int = 5
+    initial_trust_score: float = 0.5
+    max_trust_score: float = 1.0
+    trust_decay_rate: float = 0.1
+    trust_reward_rate: float = 0.05
 
 
 # --- INTER-AGENT COMMUNICATION ---
@@ -31,7 +35,7 @@ class MessageModel(BaseModel):
     sender_id: str
     receiver_id: str
     message_type: str
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
 
 
 # --- AGI DATA MODELS ---
@@ -57,9 +61,9 @@ class ActionStep(BaseModel):
     """Defines a single step in a plan, designed for delegation."""
 
     action: str
-    parameters: Dict[str, Any]
+    parameters: dict[str, Any]
     assigned_persona: str
-    risk: Optional[Literal["low", "medium", "high"]] = "low"
+    risk: Literal["low", "medium", "high"] | None = "low"
 
 
 # --- NEW: Structured Action Definitions ---
@@ -73,7 +77,7 @@ class ActionParameter(BaseModel):
 class ActionDefinition(BaseModel):
     name: str
     description: str
-    parameters: List[ActionParameter]
+    parameters: list[ActionParameter]
     assigned_persona: str
 
 
@@ -84,11 +88,11 @@ GoalMode = Literal["code", "docs"]
 class GoalModel(BaseModel):
     id: str = Field(default_factory=lambda: f"goal_{token_hex(8)}")
     description: str
-    sub_tasks: List[ActionStep]
+    sub_tasks: list[ActionStep]
     status: GoalStatus = "active"
     mode: GoalMode = "code"
-    last_failure: Optional[str] = None
-    original_plan: Optional[List[ActionStep]] = None
+    last_failure: str | None = None
+    original_plan: list[ActionStep] | None = None
     failure_count: int = 0
     max_failures: int = 3
     refinement_count: int = 0
@@ -97,19 +101,19 @@ class GoalModel(BaseModel):
 
 class PlannerOutput(BaseModel):
     thought: str
-    plan: List[ActionStep]
+    plan: list[ActionStep]
 
 
 class ExecutionStepRecord(BaseModel):
     step: ActionStep
-    workspace_after: Dict[str, Any]
+    workspace_after: dict[str, Any]
 
 
 class SkillModel(BaseModel):
     id: str = Field(default_factory=lambda: f"skill_{token_hex(8)}")
     name: str
     description: str
-    action_sequence: List[ActionStep]
+    action_sequence: list[ActionStep]
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -135,7 +139,7 @@ PerceptionType = Literal[
 class PerceptionEvent(BaseModel):
     source: PerceptionSource
     type: PerceptionType
-    content: Dict[str, Any]
+    content: dict[str, Any]
     timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -170,12 +174,12 @@ MemoryType = Literal[
 class MemoryEntryModel(BaseModel):
     id: str = Field(default_factory=lambda: f"mem_{token_hex(12)}")
     type: MemoryType
-    content: Dict[str, Any]
+    content: dict[str, Any]
     timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     importance: Annotated[float, Field(ge=0.0, le=1.0)] = 0.5
-    embedding: Optional[List[float]] = None
+    embedding: list[float] | None = None
 
 
 class MetaEventModel(BaseModel):
