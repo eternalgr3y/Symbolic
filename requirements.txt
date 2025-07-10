@@ -1,0 +1,22 @@
+# Core Dependencies
+openai
+pydantic
+redis
+fastapi
+uvicorn
+colorlog
+watchfiles
+playwright
+beautifulsoup4
+requests
+ddgs
+numpy
+faiss-cpu
+aiosqlite
+aiofiles
+
+# Development & Testing Dependencies
+pytest
+pytest-asyncio
+black
+mypy

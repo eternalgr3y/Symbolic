@@ -131,7 +131,7 @@ class MutationExperiment:
             
             # If this attempt failed, force introspection and mutation
             if not attempt_result.get('success', False):
-                print(f"    💭 Forcing failure analysis and potential mutation...")
+                print("\n    💭 Forcing failure analysis and potential mutation...")
                 await self.force_failure_analysis(goal_id, attempt_result, challenge)
             
             # Give time for mutation to occur
@@ -346,11 +346,12 @@ class MutationExperiment:
         for conclusion in conclusions:
             print(f"  {conclusion}")
         
-        # Save detailed results
-        with open('mutation_experiment_results.json', 'w') as f:
-            json.dump(self.results, f, indent=2, default=str)
+        # Save detailed results asynchronously
+        import aiofiles
+        async with aiofiles.open('mutation_experiment_results.json', 'w') as f:
+            await f.write(json.dumps(self.results, indent=2, default=str))
         
-        print(f"\n💾 Detailed results saved to 'mutation_experiment_results.json'")
+        print("\n💾 Detailed results saved to 'mutation_experiment_results.json'")
 
 async def main():
     """Run the mutation experiment"""

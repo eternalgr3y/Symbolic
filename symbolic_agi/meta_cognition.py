@@ -364,10 +364,13 @@ class MetaCognitionUnit:
                 amount=self.agi.cfg.energy_regen_amount * 2
             )
 
-    def run_background_tasks(self) -> None:
+    async def run_background_tasks(self) -> None:
+        """Start the background meta-cognition tasks."""
         if self._meta_task is None:
             logging.info("MetaCognitionUnit: Starting background meta-tasks...")
             self._meta_task = asyncio.create_task(self._run_loop())
+            # Wait a moment to ensure the task has started
+            await asyncio.sleep(0.1)
         else:
             logging.warning("MetaCognitionUnit: Background meta-tasks already started.")
 

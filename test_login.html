@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AGI Test Login Page</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 50px; }
+        .login-form { max-width: 400px; margin: auto; padding: 20px; border: 1px solid #ccc; }
+        input { width: 100%; padding: 10px; margin: 10px 0; }
+        button { width: 100%; padding: 15px; background: #007cba; color: white; border: none; }
+        .success { color: green; font-weight: bold; }
+        .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="login-form">
+        <h2>AGI Test Login</h2>
+        <form id="loginForm">
+            <input type="text" id="username" placeholder="Username" required>
+            <input type="password" id="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+        </form>
+        <div id="message"></div>
+        
+        <hr>
+        <p><strong>Test Credentials:</strong></p>
+        <p>Username: admin</p>
+        <p>Password: test123</p>
+    </div>
+
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const messageDiv = document.getElementById('message');
+            
+            if (username === 'admin' && password === 'test123') {
+                messageDiv.innerHTML = '<p class="success">✅ Login Successful! Welcome, admin!</p>';
+            } else {
+                messageDiv.innerHTML = '<p class="error">❌ Login Failed! Try again.</p>';
+            }
+        });
+    </script>
+</body>
+</html>

@@ -49,6 +49,7 @@ class Planner:
         Validates that each step in a plan has a valid action for its assigned persona.
         If not, it provides feedback for replanning.
         """
+        
         invalid_steps: list[str] = []
         all_innate_actions = {action.name for action in self.skills.innate_actions}
 

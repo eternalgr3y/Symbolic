@@ -9,9 +9,11 @@ from .advanced_reasoning_system import (
     AdvancedReasoningEngine,
     ReasoningContext
 )
+# V2 CHANGE: Import the shared client instance
+from .api_client import client
 
-# Shared reasoning engine
-_reasoning_engine = AdvancedReasoningEngine()
+# V2 CHANGE: Instantiate the shared engine with the API client
+_reasoning_engine = AdvancedReasoningEngine(api_client=client)
 
 @register_innate_action("reasoning", "Analyzes problems using advanced reasoning")
 async def skill_reason_about_problem(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -23,9 +25,9 @@ async def skill_reason_about_problem(params: Dict[str, Any]) -> Dict[str, Any]:
             constraints=params.get("constraints", []),
             available_knowledge=params.get("knowledge", {})
         )
-        
+
         result = await _reasoning_engine.reason(problem, context)
-        
+
         return {
             "status": "success",
             "conclusion": result.final_conclusion,
