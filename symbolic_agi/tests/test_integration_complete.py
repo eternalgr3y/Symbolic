@@ -45,8 +45,9 @@ class TestCompleteIntegration:
             assert len(decompose_calls) > 0
             assert "emotional_context" in decompose_calls[0]
     
+    @pytest.mark.asyncio
     async def test_trust_momentum_affects_agent_selection(self):
-        """Test that trust momentum affects agent selection."""
+        """Test that trust momentum affects agent selection"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             agi = await SymbolicAGI.create(db_path=db_path)
@@ -73,8 +74,9 @@ class TestCompleteIntegration:
             agent_b_trust = agi.agent_pool.get_agent_state("agent_b")["trust_score"]
             assert agent_a_trust > agent_b_trust
     
+    @pytest.mark.asyncio
     async def test_emotional_context_affects_ethical_evaluation(self):
-        """Test that emotional context affects ethical plan evaluation."""
+        """Test that emotional context affects ethical evaluation"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             agi = await SymbolicAGI.create(db_path=db_path)
@@ -112,8 +114,9 @@ class TestCompleteIntegration:
             recent_evaluations = agi.evaluator.evaluation_history[-2:]
             assert all("emotional_context" in eval_rec for eval_rec in recent_evaluations)
     
+    @pytest.mark.asyncio
     async def test_execution_updates_emotional_state(self):
-        """Test that action execution updates emotional state appropriately."""
+        """Test that execution results update emotional state"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             agi = await SymbolicAGI.create(db_path=db_path)
@@ -150,8 +153,9 @@ class TestCompleteIntegration:
             # Confidence should decrease after failure
             assert agi.consciousness.emotional_state.confidence < pre_fail_confidence
     
+    @pytest.mark.asyncio
     async def test_plan_failure_handling_with_emotional_regulation(self):
-        """Test that plan failures trigger appropriate emotional responses and regulation."""
+        """Test plan failure handling with emotional regulation"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             agi = await SymbolicAGI.create(db_path=db_path)
@@ -187,8 +191,9 @@ class TestCompleteIntegration:
             # Regulation should reduce extreme frustration
             assert agi.consciousness.emotional_state.frustration < 0.8
     
+    @pytest.mark.asyncio
     async def test_complete_autonomous_cycle_with_integration(self):
-        """Test a complete autonomous cycle with all integrations working together."""
+        """Test complete autonomous cycle with all integrations"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             agi = await SymbolicAGI.create(db_path=db_path)

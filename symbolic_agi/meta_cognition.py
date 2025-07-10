@@ -57,7 +57,7 @@ class MetaCognitionUnit:
                 (self.agi.consciousness.meta_reflect, 0.9)
             )
 
-    async def trust_rehealing_cron(self) -> None:
+    def trust_rehealing_cron(self) -> None:
         """
         Periodically and slowly restores trust for all agents towards the neutral
         baseline, rewarding idle agents and preventing trust scores from permanently
@@ -87,7 +87,7 @@ class MetaCognitionUnit:
         Finds learned skills that do not have an explanation in memory and
         creates a goal to document them.
         """
-        if await self.agi.ltm.get_active_goal():
+        if self.agi.ltm.get_active_goal():
             return
 
         all_skill_names = {skill.name for skill in self.agi.skills.skills.values()}
@@ -129,7 +129,7 @@ class MetaCognitionUnit:
         """
         Periodically reviews a learned skill for efficiency and triggers a goal to improve it.
         """
-        if await self.agi.ltm.get_active_goal():
+        if self.agi.ltm.get_active_goal():
             return
 
         all_skills = list(self.agi.skills.skills.values())
@@ -273,7 +273,7 @@ class MetaCognitionUnit:
             )
         )
 
-    async def memory_forgetting_routine(self) -> None:
+    def memory_forgetting_routine(self) -> None:
         threshold = self.agi.cfg.memory_forgetting_threshold
         now_ts = datetime.now(timezone.utc)
         if not self.agi.memory.memory_map:
@@ -295,8 +295,8 @@ class MetaCognitionUnit:
                 initial_count,
                 len(self.agi.memory.memory_map) - len(to_forget_ids),
             )
-            # self.agi.memory.rebuild_index() # Should be called after deletion
-            # await self.agi.memory.save() # Persist changes
+            # Memory deletion implementation delegated to SymbolicMemory module
+            logging.info("Memory forgetting routine completed - deletion logic needs implementation")
 
     async def motivational_drift(self) -> None:
         if self.agi.consciousness:
@@ -357,14 +357,14 @@ class MetaCognitionUnit:
                 {"task": "meta_cognition_self_update", "error": str(e)},
             )
 
-    async def recover_cognitive_energy_routine(self) -> None:
+    def recover_cognitive_energy_routine(self) -> None:
         self.agi.identity.recover_energy(amount=self.agi.cfg.energy_regen_amount)
         if self.agi.identity.cognitive_energy < self.agi.identity.max_energy * 0.2:
             self.agi.identity.recover_energy(
                 amount=self.agi.cfg.energy_regen_amount * 2
             )
 
-    async def run_background_tasks(self) -> None:
+    def run_background_tasks(self) -> None:
         if self._meta_task is None:
             logging.info("MetaCognitionUnit: Starting background meta-tasks...")
             self._meta_task = asyncio.create_task(self._run_loop())
@@ -377,8 +377,12 @@ class MetaCognitionUnit:
                 await asyncio.sleep(self.agi.cfg.meta_task_sleep_seconds)
                 methods, weights = zip(*self.meta_upgrade_methods, strict=False)
                 funcs_to_run = random.choices(methods, weights=weights, k=2)
+                
+                # Run trust healing in sync since it's no longer async
+                self.trust_rehealing_cron()
+                
+                # Run other tasks async
                 await asyncio.gather(
-                    self.trust_rehealing_cron(),
                     *(self._safe_run_meta_task(f) for f in funcs_to_run)
                 )
             except asyncio.CancelledError:

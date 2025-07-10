@@ -9,41 +9,46 @@ import json
 import sys
 import os
 import time
+import logging
 from datetime import datetime, timezone
 from typing import Dict, Any
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Add the symbolic_agi package to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 async def start_monitoring_demo():
     """Start comprehensive monitoring demonstration"""
-    print("📊 SYMBOLIC AGI - COMPREHENSIVE MONITORING")
-    print("=" * 50)
+    logger.info("📊 SYMBOLIC AGI - COMPREHENSIVE MONITORING")
+    logger.info("=" * 50)
     
     try:
         # Import and start Prometheus monitoring
         from symbolic_agi.prometheus_monitoring import start_prometheus_monitoring, agi_metrics, get_prometheus_metrics
         
-        print("🚀 Starting Prometheus monitoring server...")
+        logger.info("🚀 Starting Prometheus monitoring server...")
         start_prometheus_monitoring(port=8000)
         
         # Wait a moment for server to start
         await asyncio.sleep(2)
         
-        print("✅ Prometheus server started on http://localhost:8000/metrics")
-        print("\n🔍 AVAILABLE METRICS:")
-        print("  • agi_tokens_used_total - Token consumption by role/model")
-        print("  • agi_api_requests_total - API request count and status")
-        print("  • agi_api_cost_usd_total - Total API costs")
-        print("  • agi_plans_total - Plan creation and approval rates")
-        print("  • agi_qa_reviews_total - QA review results")
-        print("  • agi_tool_usage_total - Tool invocation statistics")
-        print("  • agi_safety_violations_total - Safety incident tracking")
-        print("  • agi_uptime_seconds - System uptime")
-        print("  • agi_memory_entries_total - Memory storage stats")
+        logger.info("✅ Prometheus server started on http://localhost:8000/metrics")
+        logger.info("\n🔍 AVAILABLE METRICS:")
+        logger.info("  • agi_tokens_used_total - Token consumption by role/model")
+        logger.info("  • agi_api_requests_total - API request count and status")
+        logger.info("  • agi_api_cost_usd_total - Total API costs")
+        logger.info("  • agi_plans_total - Plan creation and approval rates")
+        logger.info("  • agi_qa_reviews_total - QA review results")
+        logger.info("  • agi_tool_usage_total - Tool invocation statistics")
+        logger.info("  • agi_safety_violations_total - Safety incident tracking")
+        logger.info("  • agi_uptime_seconds - System uptime")
+        logger.info("  • agi_memory_entries_total - Memory storage stats")
         
         # Simulate some metrics
-        print("\n🧪 Generating sample metrics...")
+        logger.info("\n🧪 Generating sample metrics...")
         
         try:
             # Simulate token usage
@@ -75,13 +80,13 @@ async def start_monitoring_demo():
             # Update system state
             agi_metrics.update_system_state(2, {"orchestrator": 1, "qa": 1, "specialist": 2})
             
-            print("✅ Sample metrics generated")
+            logger.info("✅ Sample metrics generated")
         except Exception as e:
-            print(f"⚠️  Failed to generate sample metrics: {e}")
-            print("💡 This is normal if prometheus_client is not installed")
+            logger.warning("⚠️  Failed to generate sample metrics: %s", e)
+            logger.info("💡 This is normal if prometheus_client is not installed")
         
         # Now test with actual AGI if available
-        print("\n🧠 Testing with actual AGI system...")
+        logger.info("\n🧠 Testing with actual AGI system...")
         
         try:
             from symbolic_agi.agi_controller import SymbolicAGI
@@ -99,51 +104,51 @@ async def start_monitoring_demo():
                 ]
             }
             
-            print("🔍 Testing QA agent with monitoring...")
+            logger.info("🔍 Testing QA agent with monitoring...")
             qa_result = await qa_agent.review_plan(workspace=test_workspace)
             
-            print(f"✅ QA Review completed: {qa_result.get('approved', False)}")
-            print(f"📊 Overall score: {qa_result.get('overall_score', 'N/A')}")
+            logger.info("✅ QA Review completed: %s", qa_result.get('approved', False))
+            logger.info("📊 Overall score: %s", qa_result.get('overall_score', 'N/A'))
             
             # Get performance report
             performance = qa_agent.get_performance_report()
-            print(f"📈 QA Performance: {performance['approval_rate']:.1%} approval rate")
+            logger.info("📈 QA Performance: %.1f%% approval rate", performance['approval_rate'] * 100)
             
         except Exception as e:
-            print(f"⚠️  AGI system test failed: {e}")
-            print("💡 This is normal if AGI is not fully configured")
+            logger.warning("⚠️  AGI system test failed: %s", e)
+            logger.info("💡 This is normal if AGI is not fully configured")
         
-        print("\n📊 CURRENT METRICS SNAPSHOT:")
-        print("=" * 40)
+        logger.info("\n📊 CURRENT METRICS SNAPSHOT:")
+        logger.info("=" * 40)
         
         # Show some current metrics
         try:
             # Get partial metrics as text (Prometheus format is binary)
-            print("🔢 Token Usage:")
-            print(f"  • Total API requests: Tracked per role/model")
-            print(f"  • Response times: Histogram with percentiles")
-            print(f"  • Costs: Running total in USD")
+            logger.info("🔢 Token Usage:")
+            logger.info("  • Total API requests: Tracked per role/model")
+            logger.info("  • Response times: Histogram with percentiles")
+            logger.info("  • Costs: Running total in USD")
             
-            print("\n🛡️ Safety & Quality:")
-            print(f"  • QA reviews: Success/failure rates")
-            print(f"  • Safety violations: Count by type")
-            print(f"  • Ethical scores: Distribution tracking")
+            logger.info("\n🛡️ Safety & Quality:")
+            logger.info("  • QA reviews: Success/failure rates")
+            logger.info("  • Safety violations: Count by type")
+            logger.info("  • Ethical scores: Distribution tracking")
             
-            print("\n⚡ Performance:")
-            print(f"  • Tool execution times: Histogram")
-            print(f"  • Memory operations: Count by operation")
-            print(f"  • System uptime: Current session time")
+            logger.info("\n⚡ Performance:")
+            logger.info("  • Tool execution times: Histogram")
+            logger.info("  • Memory operations: Count by operation")
+            logger.info("  • System uptime: Current session time")
             
         except Exception as e:
-            print(f"Could not display metrics: {e}")
+            logger.error("Could not display metrics: %s", e)
         
-        print(f"\n🌐 MONITORING ENDPOINTS:")
-        print("  • Prometheus: http://localhost:8000/metrics")
-        print("  • Grafana setup: Import AGI dashboard")
-        print("  • Alerting: Configure for safety violations")
+        logger.info("\n🌐 MONITORING ENDPOINTS:")
+        logger.info("  • Prometheus: http://localhost:8000/metrics")
+        logger.info("  • Grafana setup: Import AGI dashboard")
+        logger.info("  • Alerting: Configure for safety violations")
         
-        print(f"\n⏰ Monitoring server will run in background...")
-        print("Press Ctrl+C to stop")
+        logger.info("\n⏰ Monitoring server will run in background...")
+        logger.info("Press Ctrl+C to stop")
         
         # Keep running
         try:
@@ -152,11 +157,11 @@ async def start_monitoring_demo():
                 # Update uptime
                 agi_metrics.update_system_state(2, {"orchestrator": 1, "qa": 1})
         except KeyboardInterrupt:
-            print("\n👋 Monitoring stopped")
+            logger.info("\n👋 Monitoring stopped")
             
     except Exception as e:
-        print(f"❌ Monitoring demo failed: {e}")
-        print("💡 Make sure prometheus_client is installed: pip install prometheus_client")
+        logger.error("❌ Monitoring demo failed: %s", e)
+        logger.info("💡 Make sure prometheus_client is installed: pip install prometheus_client")
 
 def create_grafana_dashboard():
     """Create Grafana dashboard configuration for AGI monitoring"""

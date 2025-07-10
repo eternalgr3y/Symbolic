@@ -398,56 +398,61 @@ class PrometheusServer:
 def prometheus_timer(metric_name: str):
     """Decorator to time function execution for Prometheus"""
     def decorator(func):
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            start_time = time.time()
-            success = False
-            try:
-                result = await func(*args, **kwargs)
-                success = True
-                return result
-            except Exception as e:
-                success = False
-                raise e
-            finally:
-                execution_time = time.time() - start_time
-                # Try to record metric if global metrics instance is available
-                try:
-                    if hasattr(agi_metrics, 'tool_execution_time'):
-                        # Use tool_execution_time as a generic timing metric
-                        agi_metrics.tool_execution_time.labels(tool_name=metric_name).observe(execution_time)
-                        agi_metrics.tool_usage_total.labels(tool_name=metric_name, 
-                                                           status='success' if success else 'failure').inc()
-                except Exception as metric_error:
-                    logging.warning(f"Failed to record prometheus timer metric: {metric_error}")
-        
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            start_time = time.time()
-            success = False
-            try:
-                result = func(*args, **kwargs)
-                success = True
-                return result
-            except Exception as e:
-                success = False
-                raise e
-            finally:
-                execution_time = time.time() - start_time
-                # Try to record metric if global metrics instance is available
-                try:
-                    if hasattr(agi_metrics, 'tool_execution_time'):
-                        agi_metrics.tool_execution_time.labels(tool_name=metric_name).observe(execution_time)
-                        agi_metrics.tool_usage_total.labels(tool_name=metric_name, 
-                                                           status='success' if success else 'failure').inc()
-                except Exception as metric_error:
-                    logging.warning(f"Failed to record prometheus timer metric: {metric_error}")
-        
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper
+            return _create_async_wrapper(func, metric_name)
         else:
-            return sync_wrapper
+            return _create_sync_wrapper(func, metric_name)
     return decorator
+
+
+def _create_async_wrapper(func, metric_name: str):
+    """Create async wrapper for prometheus timing."""
+    @wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        start_time = time.time()
+        success = False
+        try:
+            result = await func(*args, **kwargs)
+            success = True
+            return result
+        except Exception as e:
+            success = False
+            raise e
+        finally:
+            _record_timing_metrics(metric_name, start_time, success)
+    return async_wrapper
+
+
+def _create_sync_wrapper(func, metric_name: str):
+    """Create sync wrapper for prometheus timing."""
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        start_time = time.time()
+        success = False
+        try:
+            result = func(*args, **kwargs)
+            success = True
+            return result
+        except Exception as e:
+            success = False
+            raise e
+        finally:
+            _record_timing_metrics(metric_name, start_time, success)
+    return sync_wrapper
+
+
+def _record_timing_metrics(metric_name: str, start_time: float, success: bool):
+    """Record timing metrics to Prometheus."""
+    execution_time = time.time() - start_time
+    try:
+        if hasattr(agi_metrics, 'tool_execution_time'):
+            agi_metrics.tool_execution_time.labels(tool_name=metric_name).observe(execution_time)
+            agi_metrics.tool_usage_total.labels(
+                tool_name=metric_name, 
+                status='success' if success else 'failure'
+            ).inc()
+    except Exception as metric_error:
+        logging.warning(f"Failed to record prometheus timer metric: {metric_error}")
 
 # Global metrics instance
 agi_metrics = AGIPrometheusMetrics()

@@ -56,7 +56,7 @@ class SmartDelegationStrategy(ExecutionStrategy):
             direct_strategy = DirectExecutionStrategy(self.agi)
             return await direct_strategy.execute_step(step, goal)
         
-        return await self._delegate_to_agent(best_agent, step, goal)
+        return await self._delegate_to_agent(best_agent, step)
     
     def _select_optimal_agent(self, step: ActionStep) -> Optional[str]:
         """Select best agent based on performance metrics."""
@@ -69,7 +69,7 @@ class SmartDelegationStrategy(ExecutionStrategy):
         # Simple selection: first available agent (can be enhanced)
         return available_agents[0]
     
-    async def _delegate_to_agent(self, agent_id: str, step: ActionStep, goal: GoalModel) -> bool:
+    async def _delegate_to_agent(self, agent_id: str, step: ActionStep) -> bool:
         """Delegate task to specific agent."""
         try:
             reply = await self.agi.delegate_task_and_wait(agent_id, step)

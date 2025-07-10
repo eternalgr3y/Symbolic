@@ -6,12 +6,16 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict
 
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 from .skill_manager import register_innate_action
 
 from . import prompts
 from .api_client import monitored_chat_completion
 from .schemas import MessageModel, SkillModel
 from .message_bus import RedisMessageBus
+
+# Constants for error messages
+NO_CONTENT_FROM_LLM_ERROR = "No content returned from LLM."
 
 if TYPE_CHECKING:
     from .message_bus import RedisMessageBus
@@ -46,7 +50,7 @@ class Agent:
             except asyncio.CancelledError:
                 self.running = False
                 logging.info("Agent '%s' received cancel signal.", self.name)
-                break
+                raise  # Re-raise CancelledError for proper async cleanup
         logging.info("Agent '%s' has shut down.", self.name)
 
     async def _reply(
@@ -189,7 +193,7 @@ class Agent:
                         "feedback", "QA review returned an incomplete response."
                     ),
                 }
-            return {"status": "failure", "error": "No content returned from LLM."}
+            return {"status": "failure", "error": NO_CONTENT_FROM_LLM_ERROR}
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
@@ -225,7 +229,7 @@ class Agent:
                     ),
                     "state_updates": response_data.get("state_updates", {}),
                 }
-            return {"status": "failure", "error": "No content returned from LLM."}
+            return {"status": "failure", "error": NO_CONTENT_FROM_LLM_ERROR}
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
@@ -245,7 +249,7 @@ class Agent:
             if content is not None:
                 summary = content.strip()
                 return {"status": "success", "research_summary": summary}
-            return {"status": "failure", "error": "No content returned from LLM."}
+            return {"status": "failure", "error": NO_CONTENT_FROM_LLM_ERROR}
         except Exception as e:
             return {"status": "failure", "error": str(e)}
 
@@ -267,6 +271,6 @@ class Agent:
             if content is not None:
                 review = content.strip()
                 return {"status": "success", "code_review": review}
-            return {"status": "failure", "error": "No content returned from LLM."}
+            return {"status": "failure", "error": NO_CONTENT_FROM_LLM_ERROR}
         except Exception as e:
             return {"status": "failure", "error": str(e)}

@@ -23,6 +23,7 @@ class RedisMessageBus:
         self.listener_tasks: Dict[str, asyncio.Task[None]] = {}
         self.pubsub: Optional[redis_async.client.PubSub] = None
         self.is_running = False
+        self._background_tasks: set = set()  # To prevent task garbage collection
 
     async def _initialize(self) -> None:
         if self.is_running:
@@ -44,8 +45,10 @@ class RedisMessageBus:
         """Allows an agent to subscribe to the bus, receiving its own message queue."""
         if agent_id not in self.agent_queues:
             if not self.is_running:
-                # Lazy initialization
-                asyncio.create_task(self._initialize())
+                # Lazy initialization - save task to prevent garbage collection
+                init_task = asyncio.create_task(self._initialize())
+                self._background_tasks.add(init_task)
+                init_task.add_done_callback(self._background_tasks.discard)
 
             queue: asyncio.Queue[Optional[MessageModel]] = asyncio.Queue()
             self.agent_queues[agent_id] = queue
@@ -70,6 +73,7 @@ class RedisMessageBus:
                     await queue.put(msg_model)
         except asyncio.CancelledError:
             logging.info(f"[MessageBus] Listener for '{agent_id}' cancelled.")
+            raise  # Re-raise CancelledError for proper async cleanup
         except Exception as e:
             logging.error(f"[MessageBus] Listener for '{agent_id}' failed: {e}", exc_info=True)
 

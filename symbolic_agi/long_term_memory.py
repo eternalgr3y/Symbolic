@@ -145,7 +145,7 @@ class LongTermMemory:
             return
         
         # Calculate initial priority
-        priority = await self._calculate_goal_priority(goal)
+        priority = self._calculate_goal_priority(goal)
         self._goal_priority_cache[goal.id] = priority
         
         async with self._save_lock:
@@ -182,7 +182,7 @@ class LongTermMemory:
                 logging.error("Failed to add goal %s to database: %s", goal.id, e, exc_info=True)
                 raise
 
-    async def get_goal_by_id(self, goal_id: str) -> Optional[GoalModel]:
+    def get_goal_by_id(self, goal_id: str) -> Optional[GoalModel]:
         """Retrieves a goal by its unique ID."""
         return self.goals.get(goal_id)
 
@@ -210,7 +210,7 @@ class LongTermMemory:
                     logging.error("Failed to update goal %s status: %s", goal_id, e, exc_info=True)
                     raise
 
-    async def get_active_goal(self) -> Optional[GoalModel]:
+    def get_active_goal(self) -> Optional[GoalModel]:
         """Retrieves the first active goal from the list."""
         for goal in self.goals.values():
             if goal.status == "active":
@@ -391,7 +391,7 @@ class LongTermMemory:
         except Exception as e:
             logging.error("Failed to perform periodic cleanup: %s", e)
 
-    async def _calculate_goal_priority(self, goal: GoalModel) -> float:
+    def _calculate_goal_priority(self, goal: GoalModel) -> float:
         """Calculates dynamic priority based on various factors."""
         base_priority = 0.5
         
@@ -420,7 +420,7 @@ class LongTermMemory:
                 self.goals[goal.id] = goal
                 
                 # Recalculate priority
-                priority = await self._calculate_goal_priority(goal)
+                priority = self._calculate_goal_priority(goal)
                 self._goal_priority_cache[goal.id] = priority
                 
                 # Update database

@@ -11,6 +11,13 @@ from typing import Any, Callable, Dict, List, Optional, cast
 from . import config
 from .api_client import monitored_chat_completion
 
+# Constants for common error messages and statuses
+STATUS_SUCCESS = "success"
+STATUS_FAILURE = "failure"
+ERROR_AGENT_OR_OBJECT_NOT_FOUND = "Agent or object not found."
+ERROR_AGENT_NOT_FOUND = "Agent not found."
+ERROR_OBJECT_NOT_FOUND = "Object not found."
+
 
 class MicroWorld:
     """A rich, multi-agent, multi-room simulated world with persistent state."""
@@ -35,7 +42,7 @@ class MicroWorld:
             },
         }
         self.state_file_path = os.path.join(
-            config.WORKSPACE_DIR, "microworld_state.json"
+            config.WORKSPACE_DIR, "micro_world_state.json"
         )
         self.state = self._load_state()
 
@@ -146,6 +153,9 @@ class MicroWorld:
         """Simulate time passing in the world (random agent wandering)."""
         state_changed = False
         try:
+            # Yield control to allow other async operations
+            await asyncio.sleep(0)
+            
             if random.random() < 0.1:
                 agent = random.choice(self.state["agents"])
                 current_location_data = self.room_map.get(agent["location"])
@@ -196,7 +206,7 @@ class MicroWorld:
 
             if not method_to_call:
                 return {
-                    "status": "failure",
+                    "status": STATUS_FAILURE,
                     "description": f"World action '{action}' not found.",
                 }
 
@@ -216,7 +226,7 @@ class MicroWorld:
                     f"{', '.join(missing)}."
                 )
                 logging.error(error_msg)
-                return {"status": "failure", "description": error_msg}
+                return {"status": STATUS_FAILURE, "description": error_msg}
 
             result: Any
             if asyncio.iscoroutinefunction(method_to_call):
@@ -229,14 +239,14 @@ class MicroWorld:
             )
             logging.info("WORLD ACTION: %s with %s -> %s", action, kwargs, result)
 
-            if result.get("status") == "success":
+            if result.get("status") == STATUS_SUCCESS:
                 self._save_state(self.state)
 
             return cast(Dict[str, Any], result)
         except Exception as e:
             err_msg = f"Error performing action '{action}': {type(e).__name__}: {e}"
             logging.error(err_msg, exc_info=True)
-            return {"status": "failure", "description": err_msg}
+            return {"status": STATUS_FAILURE, "description": err_msg}
 
     # ========== Actions ==========
 
@@ -246,12 +256,12 @@ class MicroWorld:
         """Moves an agent to a new location if possible."""
         agent = self.get_agent(agent_name)
         if not agent:
-            return {"status": "failure", "description": f"Agent '{agent_name}' not found."}
+            return {"status": STATUS_FAILURE, "description": f"Agent '{agent_name}' not found."}
 
         current_room_exits = self.room_map.get(agent["location"], {}).get("exits", [])
         if new_location not in current_room_exits:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": (
                     f"Cannot move from {agent['location']} to {new_location}. "
                     "No direct exit."
@@ -265,13 +275,13 @@ class MicroWorld:
                 and door["locked"]
             ):
                 return {
-                    "status": "failure",
+                    "status": STATUS_FAILURE,
                     "description": f"The door to {new_location} is locked.",
                 }
 
         agent["location"] = new_location
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "description": f"{agent_name} moves to {new_location}.",
         }
 
@@ -282,18 +292,18 @@ class MicroWorld:
         agent = self.get_agent(agent_name)
         obj = self.get_object(object_name)
         if not agent:
-            return {"status": "failure", "description": f"Agent '{agent_name}' not found."}
+            return {"status": STATUS_FAILURE, "description": f"Agent '{agent_name}' not found."}
         if not obj:
-            return {"status": "failure", "description": f"Object '{object_name}' not found."}
+            return {"status": STATUS_FAILURE, "description": f"Object '{object_name}' not found."}
         if agent["location"] != obj.get("location"):
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{agent_name} is not in the same location as {object_name}.",
             }
         desc = obj.get("description", f"You see a {object_name}.")
         details = f"State: {obj.get('state', 'normal')}" if "state" in obj else ""
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "description": f"{agent_name} reads {object_name}: {desc} {details}".strip(),
         }
 
@@ -304,23 +314,23 @@ class MicroWorld:
         agent = self.get_agent(agent_name)
         obj = self.get_object(object_name)
         if not agent or not obj:
-            return {"status": "failure", "description": "Agent or object not found."}
+            return {"status": STATUS_FAILURE, "description": ERROR_AGENT_OR_OBJECT_NOT_FOUND}
         if agent["location"] != obj.get("location"):
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{object_name} is not in the same room as {agent_name}.",
             }
 
         if obj.get("state") == "fixed":
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{object_name} cannot be picked up.",
             }
 
         agent["inventory"].append(object_name)
         obj["location"] = "inventory"
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "description": f"{agent_name} picked up {object_name}.",
         }
 
@@ -331,16 +341,16 @@ class MicroWorld:
         agent = self.get_agent(agent_name)
         obj = self.get_object(object_name)
         if not agent or not obj:
-            return {"status": "failure", "description": "Agent or object not found."}
+            return {"status": STATUS_FAILURE, "description": ERROR_AGENT_OR_OBJECT_NOT_FOUND}
         if object_name not in agent["inventory"]:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{agent_name} does not have {object_name} in inventory.",
             }
         agent["inventory"].remove(object_name)
         obj["location"] = agent["location"]
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "description": f"{agent_name} dropped {object_name} in {agent['location']}.",
         }
 
@@ -351,7 +361,7 @@ class MicroWorld:
         agent = self.get_agent(agent_name)
         obj = self.get_object(object_name)
         if not agent or not obj:
-            return {"status": "failure", "description": "Agent or object not found."}
+            return {"status": STATUS_FAILURE, "description": ERROR_AGENT_OR_OBJECT_NOT_FOUND}
         
         # Debug logging
         logging.info(f"DEBUG: Agent {agent_name} location: {agent.get('location')}")
@@ -359,7 +369,7 @@ class MicroWorld:
         
         if agent["location"] != obj.get("location"):
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{agent_name} is not in the same location as {object_name}. Agent in {agent['location']}, object in {obj.get('location')}.",
             }
     
@@ -369,30 +379,30 @@ class MicroWorld:
                 if "Key" in agent["inventory"]:
                     obj["state"] = "unlocked"
                     return {
-                        "status": "success",
+                        "status": STATUS_SUCCESS,
                         "description": "Unlocked the Chest with the Key!",
                     }
                 else:
                     return {
-                        "status": "failure",
+                        "status": STATUS_FAILURE,
                         "description": "The Chest is locked. You need a Key.",
                     }
             elif obj.get("state") == "unlocked":
                 obj["state"] = "open"
                 return {
-                    "status": "success",
+                    "status": STATUS_SUCCESS,
                     "description": "Opened the Chest.",
                 }
             elif obj.get("state") == "open":
-                return {"status": "success", "description": "The Chest is already open."}
+                return {"status": STATUS_SUCCESS, "description": "The Chest is already open."}
             else:
                 return {
-                    "status": "failure",
+                    "status": STATUS_FAILURE,
                     "description": f"The Chest state is {obj.get('state')} and cannot be opened.",
                 }
 
         return {
-            "status": "failure",
+            "status": STATUS_FAILURE,
             "description": f"{object_name} cannot be opened or is already open.",
         }
 
@@ -404,18 +414,18 @@ class MicroWorld:
         target = self.get_agent(target_agent)
         if not agent or not target:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": "Asking agent or target agent not found.",
             }
         if agent["location"] != target["location"]:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{target_agent} is not in the same location as {asking_agent}.",
             }
 
         if target_agent.lower() == "user":
             return {
-                "status": "success",
+                "status": STATUS_SUCCESS,
                 "response_text": f"{asking_agent} asked you: {question}",
             }
 
@@ -440,7 +450,7 @@ class MicroWorld:
                 f"{target_agent} says: I don't know yet, but I'll try to help next time!"
             )
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "response_text": f"{asking_agent} asked {target_agent}: {question}\n{answer}",
         }
 
@@ -448,12 +458,12 @@ class MicroWorld:
         """Allows an agent to observe its current surroundings."""
         agent = self.get_agent(agent_name)
         if not agent:
-            return {"status": "failure", "description": f"Agent '{agent_name}' not found."}
+            return {"status": STATUS_FAILURE, "description": f"Agent '{agent_name}' not found."}
 
         location = agent["location"]
         room = self.room_map.get(location)
         if not room:
-            return {"status": "failure", "description": f"Room '{location}' not found in map."}
+            return {"status": STATUS_FAILURE, "description": f"Room '{location}' not found in map."}
 
         objects_here = [obj["name"] for obj in self.room_objects(location)]
         agents_here = [
@@ -461,7 +471,7 @@ class MicroWorld:
         ]
 
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "description": (
                 f"You are in {location}. {room['desc']} You see: "
                 f"{', '.join(objects_here) or 'nothing'}. "
@@ -479,16 +489,16 @@ class MicroWorld:
 
         if not agent or not recipient or not obj:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": "Giving agent, receiving agent, or item not found.",
             }
 
         if agent["location"] != recipient["location"]:
-            return {"status": "failure", "description": "Recipient not in the same room."}
+            return {"status": STATUS_FAILURE, "description": "Recipient not in the same room."}
 
         if item_name not in agent["inventory"]:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"{giving_agent} does not have {item_name} in inventory.",
             }
 
@@ -497,7 +507,7 @@ class MicroWorld:
         obj["location"] = "inventory"
 
         return {
-            "status": "success",
+            "status": STATUS_SUCCESS,
             "description": f"{giving_agent} gave {item_name} to {receiving_agent}.",
         }
 
@@ -507,11 +517,11 @@ class MicroWorld:
         """Allows an agent to combine two items."""
         agent = self.get_agent(agent_name)
         if not agent:
-            return {"status": "failure", "description": "Agent not found."}
+            return {"status": STATUS_FAILURE, "description": ERROR_AGENT_NOT_FOUND}
 
         if item1_name not in agent["inventory"] or item2_name not in agent["inventory"]:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": "Agent does not have both items to combine.",
             }
 
@@ -530,9 +540,9 @@ class MicroWorld:
                     "description": "A crude hammer made from a stick and a rock.",
                 }
             )
-            return {"status": "success", "description": f"{agent_name} crafted a Hammer."}
+            return {"status": STATUS_SUCCESS, "description": f"{agent_name} crafted a Hammer."}
 
-        return {"status": "failure", "description": "These items cannot be combined."}
+        return {"status": STATUS_FAILURE, "description": "These items cannot be combined."}
 
     def _action_use(
         self: "MicroWorld", agent_name: str, item_name: str, target_name: str
@@ -540,23 +550,23 @@ class MicroWorld:
         """Allows an agent to use an item on a target."""
         agent = self.get_agent(agent_name)
         if not agent:
-            return {"status": "failure", "description": "Agent not found."}
+            return {"status": STATUS_FAILURE, "description": ERROR_AGENT_NOT_FOUND}
         if item_name not in agent["inventory"]:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"Agent does not have a {item_name} in inventory.",
             }
 
         target = self.get_object(target_name)
         if not target:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"Target object {target_name} not found.",
             }
 
         if target.get("location") != agent["location"]:
             return {
-                "status": "failure",
+                "status": STATUS_FAILURE,
                 "description": f"The {target_name} is not in the same location as {agent_name}.",
             }
 
@@ -567,11 +577,11 @@ class MicroWorld:
         ):
             target["state"] = "unlocked"
             return {
-                "status": "success",
+                "status": STATUS_SUCCESS,
                 "description": f"{agent_name} used the Hammer to break the lock on the Chest.",
             }
 
         return {
-            "status": "failure",
+            "status": STATUS_FAILURE,
             "description": f"The {item_name} has no effect on the {target_name}.",
         }

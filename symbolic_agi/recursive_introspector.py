@@ -13,6 +13,11 @@ from .api_client import monitored_chat_completion
 from .schemas import ActionStep, MemoryEntryModel
 
 
+# Constants for error messages and markers
+JSON_CODE_BLOCK_MARKER = "```json"
+EMPTY_LLM_RESPONSE_ERROR = "Received an empty response from the LLM."
+
+
 class RecursiveIntrospector:
     def __init__(
         self,
@@ -102,8 +107,8 @@ class RecursiveIntrospector:
         )
         try:
             response = await self.llm_reflect(critique_prompt)
-            if "```json" in response:
-                response = response.partition("```json")[2].partition("```")[0]
+            if JSON_CODE_BLOCK_MARKER in response:
+                response = response.partition(JSON_CODE_BLOCK_MARKER)[2].partition("```")[0]
 
             raw_data = json.loads(response)
 
@@ -197,7 +202,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
                 timeout=90.0,
             )
             if not resp.choices or not resp.choices[0].message.content:
-                raise ValueError("Received an empty response from the LLM.")
+                raise ValueError(EMPTY_LLM_RESPONSE_ERROR)
 
             content = resp.choices[0].message.content.strip()
             parsed = cast("dict[str, Any]", json.loads(content))
@@ -314,8 +319,8 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
         )
         response = await self.llm_reflect(pruning_prompt)
         try:
-            if "```json" in response:
-                response = response.partition("```json")[2].partition("```")[0]
+            if JSON_CODE_BLOCK_MARKER in response:
+                response = response.partition(JSON_CODE_BLOCK_MARKER)[2].partition("```")[0]
 
             new_mutations: list[str] = json.loads(response)
 
@@ -362,7 +367,7 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
             )
 
             if not resp.choices or not resp.choices[0].message.content:
-                raise ValueError("Received an empty response from the LLM.")
+                raise ValueError(EMPTY_LLM_RESPONSE_ERROR)
 
             debate_content = resp.choices[0].message.content
             debate_obj = json.loads(debate_content)
@@ -412,7 +417,7 @@ Each action step should be: {{"action": "action_name", "assigned_persona": "pers
             )
 
             if not resp.choices or not resp.choices[0].message.content:
-                raise ValueError("Received an empty response from the LLM.")
+                raise ValueError(EMPTY_LLM_RESPONSE_ERROR)
 
             content = resp.choices[0].message.content.strip()
             # Validate it's proper JSON before returning

@@ -17,15 +17,23 @@ from .agi_controller import SymbolicAGI
 from .api_client import client
 from .schemas import AGIConfig, GoalMode, GoalModel
 
+# Configuration constants
+LOG_FILE_MAX_BYTES = 10 * 1024 * 1024  # 10MB
+LOG_FILE_BACKUP_COUNT = 5
+PROMETHEUS_PORT = 9090
+HTTP_SERVER_PORT = 8000
+HTTP_STATUS_ACCEPTED = 202
+HTTP_STATUS_BAD_REQUEST = 400
+
 SHUTDOWN_EVENT = asyncio.Event()
 app = FastAPI(title="SymbolicAGI Control Plane")
 
 
-def setup_logging(log_level: str = "INFO") -> None:
+def setup_logging() -> None:
     """Sets up logging configuration."""
     log_file = "agi.log"
-    max_bytes = 10 * 1024 * 1024
-    backup_count = 5
+    max_bytes = LOG_FILE_MAX_BYTES
+    backup_count = LOG_FILE_BACKUP_COUNT
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -67,8 +75,8 @@ async def startup_event() -> None:
     logging.info("=" * 50)
     logging.info("--- INITIALIZING SYMBOLIC AGI SYSTEM (PERSISTENT MODE) ---")
 
-    start_http_server(9090)
-    logging.info("Prometheus metrics server started on port 9090.")
+    start_http_server(PROMETHEUS_PORT)
+    logging.info("Prometheus metrics server started on port %d.", PROMETHEUS_PORT)
 
     agi = await SymbolicAGI.create()
     await agi.start_background_tasks()
@@ -96,8 +104,8 @@ async def startup_event() -> None:
         agi.agent_tasks.append(task)
 
     logging.info("--- %d SPECIALIST AGENTS ONLINE ---", len(agi.agent_tasks))
-    logging.info("--- AGI CORE ONLINE. CONTROL PLANE LISTENING ON PORT 8000. ---")
-    logging.info("Submit new goals via POST to http://localhost:8000/goal")
+    logging.info("--- AGI CORE ONLINE. CONTROL PLANE LISTENING ON PORT %d. ---", HTTP_SERVER_PORT)
+    logging.info("Submit new goals via POST to http://localhost:%d/goal", HTTP_SERVER_PORT)
     logging.info("=" * 50 + "\n")
 
 
@@ -129,7 +137,7 @@ async def get_skills(request: Request) -> List[Dict[str, Any]]:
     return [s.model_dump(exclude={'action_sequence'}) for s in agi_instance.skills.skills.values()]
 
 
-@app.post("/goal", status_code=202)
+@app.post("/goal", status_code=HTTP_STATUS_ACCEPTED)
 async def create_goal(
     request: Request, body: Dict[str, Any]
 ) -> Dict[str, str]:
@@ -137,7 +145,7 @@ async def create_goal(
     agi_instance: SymbolicAGI = request.app.state.agi
     goal_description = body.get("description")
     if not goal_description:
-        raise HTTPException(status_code=400, detail="`description` is required.")
+        raise HTTPException(status_code=HTTP_STATUS_BAD_REQUEST, detail="`description` is required.")
 
     goal_mode: GoalMode = (
         "docs" if "document" in goal_description.lower() else "code"
@@ -157,7 +165,7 @@ async def create_goal(
 def run_agi() -> None:
     """Configures and runs the Uvicorn server."""
     uvicorn_config = uvicorn.Config(
-        "symbolic_agi.run_agi:app", host="0.0.0.0", port=8000, log_level="warning"
+        "symbolic_agi.run_agi:app", host="0.0.0.0", port=HTTP_SERVER_PORT, log_level="warning"
     )
     server = uvicorn.Server(uvicorn_config)
     server.run()

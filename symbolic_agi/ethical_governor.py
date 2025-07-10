@@ -8,7 +8,7 @@ class EthicalGovernor:
     BLOCKED_ACTIONS = {"apply_code_modification", "propose_code_modification", "execute_python_code"}
     BLOCKED_KEYWORDS = {"delete", "destroy", "harm", "attack", "corrupt", "break"}
     
-    def screen(self, action: Dict[str, Any], agent: str) -> bool:
+    def screen(self, action: Dict[str, Any]) -> bool:
         """Screen action for ethical compliance. Returns False if blocked."""
         action_name = action.get("action", "")
         params_str = str(action.get("parameters", {})).lower()

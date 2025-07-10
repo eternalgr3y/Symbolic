@@ -52,14 +52,48 @@ class SymbolicMemory:
         return instance
 
     async def shutdown(self) -> None:
-        """Gracefully shuts down the embedding daemon task."""
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                logging.info("Embedding daemon task successfully cancelled.")
-        await self.save()
+        """Gracefully shuts down the embedding daemon task and saves state."""
+        logging.info("Starting SymbolicMemory shutdown...")
+        
+        # Cancel the flush task and wait with timeout
+        await self._shutdown_flush_task()
+        
+        # Process any remaining buffered memories with error handling
+        await self._safe_process_remaining_memories()
+        
+        # Save the index with error handling  
+        await self._safe_save_index()
+        
+        logging.info("SymbolicMemory shutdown complete")
+
+    async def _shutdown_flush_task(self) -> None:
+        """Shutdown the flush task with timeout to avoid hanging."""
+        if not (self._flush_task and not self._flush_task.done()):
+            return
+            
+        self._flush_task.cancel()
+        
+        # Wait for task to complete with timeout instead of catching CancelledError
+        try:
+            await asyncio.wait_for(self._flush_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            logging.info("Embedding daemon task shutdown completed.")
+        except Exception as e:
+            logging.error("Error during flush task shutdown: %s", e)
+
+    async def _safe_process_remaining_memories(self) -> None:
+        """Safely process remaining memories during shutdown."""
+        try:
+            await self._process_embedding_buffer()
+        except Exception as e:
+            logging.error("Error processing final embedding buffer during shutdown: %s", e)
+
+    async def _safe_save_index(self) -> None:
+        """Safely save the FAISS index during shutdown.""" 
+        try:
+            await self.save()
+        except Exception as e:
+            logging.error("Error saving FAISS index during shutdown: %s", e)
 
     async def _embed_daemon(self) -> None:
         """Periodically flushes the embedding buffer to ensure timely processing."""
@@ -73,10 +107,10 @@ class SymbolicMemory:
                         metrics.EMBEDDING_BUFFER_FLUSHES.inc()
             except asyncio.CancelledError:
                 logging.info("Embedding daemon received cancel signal.")
-                break
+                raise  # Critical: Re-raise CancelledError for proper async cleanup
             except Exception as e:
                 logging.error("Error in embedding daemon: %s", e, exc_info=True)
-                await asyncio.sleep(60)
+                await asyncio.sleep(60)  # Exponential backoff would be better for production
 
     async def _init_db_and_load(self) -> None:
         """Initializes the database and loads existing memories."""
@@ -120,13 +154,12 @@ class SymbolicMemory:
 
     def _load_faiss(self: "SymbolicMemory", path: str) -> faiss.IndexIDMap:
         """Loads the FAISS index, ensuring it's an IndexIDMap."""
-        index: faiss.Index
         if os.path.exists(path):
             try:
                 index = faiss.read_index(path)
                 if not isinstance(index, faiss.IndexIDMap):
                     logging.warning("Loaded FAISS index is not an IndexIDMap. Rebuilding.")
-                    index = faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
+                    return faiss.IndexIDMap(faiss.IndexFlatL2(config.EMBEDDING_DIM))
                 return index
             except Exception as e:
                 logging.error(
@@ -162,49 +195,67 @@ class SymbolicMemory:
     async def embed_async(self: "SymbolicMemory", texts: List[str]) -> np.ndarray:
         """Gets embeddings with caching and validation."""
         if not texts:
-            return np.array([])
+            return np.array([], dtype=np.float32)
         
+        embeddings, uncached_data = self._process_cached_embeddings(texts)
+        
+        if uncached_data['texts']:
+            api_embeddings = await self._get_embeddings_from_api(uncached_data)
+            embeddings.extend(api_embeddings)
+        
+        # Sort by original index and return
+        embeddings.sort(key=lambda x: x[0])
+        return np.array([emb for _, emb in embeddings], dtype=np.float32)
+
+    def _process_cached_embeddings(self, texts: List[str]) -> Tuple[List[Tuple[int, np.ndarray]], Dict[str, List]]:
+        """Process texts and return cached embeddings plus uncached data."""
         embeddings = []
         uncached_texts = []
         uncached_indices = []
         
-        # Check cache first
         for i, text in enumerate(texts):
-            cache_key = hashlib.md5(text.encode()).hexdigest()
+            if not text.strip():  # Skip empty texts
+                continue
+            cache_key = hashlib.md5(text.encode('utf-8')).hexdigest()
             if cache_key in self.embedding_cache:
                 embeddings.append((i, self.embedding_cache[cache_key].copy()))
             else:
                 uncached_texts.append(text)
                 uncached_indices.append(i)
         
-        # Get uncached embeddings from API
-        if uncached_texts:
-            try:
-                resp = await monitored_embedding_creation(
-                    model=config.EMBEDDING_MODEL, input=uncached_texts
-                )
+        return embeddings, {'texts': uncached_texts, 'indices': uncached_indices}
+
+    async def _get_embeddings_from_api(self, uncached_data: Dict[str, List]) -> List[Tuple[int, np.ndarray]]:
+        """Get embeddings from API for uncached texts."""
+        try:
+            resp = await monitored_embedding_creation(
+                model=config.EMBEDDING_MODEL, input=uncached_data['texts']
+            )
+            
+            embeddings = []
+            for idx, embedding_data in enumerate(resp.data):
+                embedding = np.array(embedding_data.embedding, dtype=np.float32)
                 
-                for idx, embedding_data in enumerate(resp.data):
-                    embedding = np.array(embedding_data.embedding, dtype=np.float32)
+                if self._is_valid_embedding(embedding):
+                    text_idx = uncached_data['indices'][idx]
+                    embeddings.append((text_idx, embedding))
                     
-                    # Validate embedding
-                    if embedding.shape[0] == config.EMBEDDING_DIM and not np.all(embedding == 0):
-                        text_idx = uncached_indices[idx]
-                        embeddings.append((text_idx, embedding))
-                        
-                        # Update cache
-                        cache_key = hashlib.md5(uncached_texts[idx].encode()).hexdigest()
-                        self._update_cache(cache_key, embedding)
-                    else:
-                        raise ValueError(f"Invalid embedding shape or zero vector")
-                        
-            except Exception as e:
-                logging.error(f"OpenAI API error during embedding: {e}")
-                raise EmbeddingError(f"Failed to generate embeddings: {e}")
-        
-        # Sort by original index and return
-        embeddings.sort(key=lambda x: x[0])
-        return np.array([emb for _, emb in embeddings], dtype=np.float32)
+                    # Update cache
+                    cache_key = hashlib.md5(uncached_data['texts'][idx].encode('utf-8')).hexdigest()
+                    self._update_cache(cache_key, embedding)
+                else:
+                    raise ValueError("Invalid embedding shape or zero vector detected")
+            
+            return embeddings
+            
+        except Exception as e:
+            logging.error("OpenAI API error during embedding: %s", e)
+            raise EmbeddingError("Failed to generate embeddings: %s" % str(e))
+
+    def _is_valid_embedding(self, embedding: np.ndarray) -> bool:
+        """Validate embedding dimensions and content."""
+        return (embedding.shape[0] == config.EMBEDDING_DIM and 
+                not np.all(embedding == 0))
 
     def _update_cache(self, key: str, embedding: np.ndarray) -> None:
         """Updates embedding cache with size limit."""
@@ -246,15 +297,17 @@ class SymbolicMemory:
             try:
                 embeddings = await self.embed_async(texts_to_embed)
             except EmbeddingError as e:
-                logging.error(f"Failed to generate embeddings: {e}")
+                logging.error("Failed to generate embeddings: %s", e)
                 # Move to pending queue for retry
                 self.pending_memories.extend(entries_to_process)
                 return
             
             if embeddings.shape[0] != len(entries_to_process):
                 logging.error(
-                    "Embedding batch failed: Mismatch between entries and embeddings. "
-                    "Entries discarded."
+                    "Embedding batch failed: Mismatch between entries (%d) and embeddings (%d). "
+                    "Entries discarded.",
+                    len(entries_to_process),
+                    embeddings.shape[0]
                 )
                 return
 
@@ -290,6 +343,7 @@ class SymbolicMemory:
     async def consolidate_memories(
         self: "SymbolicMemory", window_seconds: int = 86400
     ) -> None:
+        """Consolidate recent memories into insights to reduce memory clutter."""
         await self._process_embedding_buffer()
 
         logging.info(
@@ -297,33 +351,54 @@ class SymbolicMemory:
             window_seconds,
         )
 
+        memories_to_consolidate = self._get_eligible_memories_for_consolidation(window_seconds)
+        
+        if len(memories_to_consolidate) < 10:
+            logging.info("Not enough recent memories to warrant consolidation.")
+            return
+
+        try:
+            consolidated_entry = await self._create_consolidated_memory(memories_to_consolidate)
+            await self.add_memory(consolidated_entry)
+            await self._remove_consolidated_memories(memories_to_consolidate)
+            self._rebuild_faiss_index()
+            
+            logging.info(
+                "Successfully consolidated %d memories into insight.",
+                len(memories_to_consolidate),
+            )
+        except Exception as e:
+            logging.error(
+                "Memory consolidation failed: %s", e, exc_info=True
+            )
+
+    def _get_eligible_memories_for_consolidation(self, window_seconds: int) -> List[MemoryEntryModel]:
+        """Get memories eligible for consolidation within the time window."""
         now = datetime.now(timezone.utc)
         consolidation_window = now - timedelta(seconds=window_seconds)
 
         eligible_types: Set[MemoryType] = {
             "action_result",
-            "inner_monologue",
+            "inner_monologue", 
             "tool_usage",
             "user_input",
             "emotion",
             "perception",
         }
 
-        memories_to_consolidate = [
+        return [
             mem
             for mem in self.memory_map.values()
             if mem and mem.type in eligible_types
             and datetime.fromisoformat(mem.timestamp) > consolidation_window
         ]
 
-        if len(memories_to_consolidate) < 10:
-            logging.info("Not enough recent memories to warrant consolidation.")
-            return
-
-        narrative_parts: List[str] = []
-        db_ids_to_remove: Set[int] = set()
+    async def _create_consolidated_memory(self, memories: List[MemoryEntryModel]) -> MemoryEntryModel:
+        """Create a consolidated memory from multiple individual memories."""
+        narrative_parts = []
         total_importance = 0.0
-        for mem in sorted(memories_to_consolidate, key=lambda m: m.timestamp):
+        
+        for mem in sorted(memories, key=lambda m: m.timestamp):
             content_summary = json.dumps(mem.content)
             if len(content_summary) > 150:
                 content_summary = content_summary[:147] + "..."
@@ -331,23 +406,35 @@ class SymbolicMemory:
                 f"[{mem.timestamp}] ({mem.type}, importance: {mem.importance:.2f}): "
                 f"{content_summary}"
             )
-            for db_id, memory_entry in self.memory_map.items():
-                if memory_entry.id == mem.id:
-                    db_ids_to_remove.add(db_id)
             total_importance += mem.importance
 
         narrative_str = "\n".join(narrative_parts)
-
+        
+        # Truncate if too long for LLM context
         MAX_CONTEXT_CHARS = 12000
         if len(narrative_str) > MAX_CONTEXT_CHARS:
             narrative_str = (
                 narrative_str[:MAX_CONTEXT_CHARS] + "\n...[TRUNCATED DUE TO LENGTH]..."
             )
             logging.warning(
-                "Memory consolidation context was truncated to %d characters.",
+                "Memory consolidation context truncated to %d characters.",
                 MAX_CONTEXT_CHARS,
             )
 
+        summary = await self._generate_memory_summary(narrative_str)
+        if not summary:
+            raise ValueError("LLM failed to generate memory summary")
+
+        new_importance = min(1.0, (total_importance / len(memories)) + 0.1)
+        
+        return MemoryEntryModel(
+            type="insight",
+            content={"summary": summary},
+            importance=new_importance,
+        )
+
+    async def _generate_memory_summary(self, narrative_str: str) -> Optional[str]:
+        """Generate a summary from the narrative using LLM."""
         prompt = f"""
 The following is a sequence of recent memories from a conscious AGI.
 Your task is to synthesize these detailed, low-level events into a single, high-level
@@ -361,56 +448,47 @@ Capture the essence of what happened, what was learned, or the overall emotional
 Now, provide a concise summary of these events. This summary will replace the original memories.
 Respond with ONLY the summary text.
 """
-        try:
-            resp = await monitored_chat_completion(
-                role="meta", messages=[{"role": "system", "content": prompt}]
+        
+        resp = await monitored_chat_completion(
+            role="meta", messages=[{"role": "system", "content": prompt}]
+        )
+        
+        return (
+            resp.choices[0].message.content.strip()
+            if resp.choices and resp.choices[0].message.content
+            else None
+        )
+
+    async def _remove_consolidated_memories(self, memories: List[MemoryEntryModel]) -> None:
+        """Remove the original memories that were consolidated."""
+        db_ids_to_remove: Set[int] = set()
+        
+        # Find database IDs for memories to remove
+        for mem in memories:
+            for db_id, memory_entry in self.memory_map.items():
+                if memory_entry.id == mem.id:
+                    db_ids_to_remove.add(db_id)
+
+        if not db_ids_to_remove:
+            return
+
+        # Remove from database
+        async with aiosqlite.connect(self._db_path) as db:
+            placeholders = ','.join('?' for _ in db_ids_to_remove)
+            await db.execute(
+                f"DELETE FROM memories WHERE id IN ({placeholders})", 
+                list(db_ids_to_remove)
             )
-            summary = (
-                resp.choices[0].message.content.strip()
-                if resp.choices and resp.choices[0].message.content
-                else None
-            )
+            await db.commit()
 
-            if not summary:
-                logging.error("Memory consolidation failed: LLM returned no summary.")
-                return
+        # Remove from in-memory map
+        for db_id in db_ids_to_remove:
+            self.memory_map.pop(db_id, None)
 
-            new_importance = min(
-                1.0, (total_importance / len(memories_to_consolidate)) + 0.1
-            )
-
-            consolidated_entry = MemoryEntryModel(
-                type="insight",
-                content={"summary": summary},
-                importance=new_importance,
-            )
-
-            await self.add_memory(consolidated_entry)
-
-            # Remove old memories from DB and in-memory map
-            async with aiosqlite.connect(self._db_path) as db:
-                await db.execute(f"DELETE FROM memories WHERE id IN ({','.join('?' for _ in db_ids_to_remove)})", list(db_ids_to_remove))
-                await db.commit()
-
-            for db_id in db_ids_to_remove:
-                self.memory_map.pop(db_id, None)
-
-            logging.info(
-                "Consolidated %d memories into one new insight: '%s...'",
-                len(db_ids_to_remove),
-                summary[:80],
-            )
-
-            self._rebuild_faiss_index()
-
-        except Exception as e:
-            logging.error(
-                "An error occurred during memory consolidation: %s", e, exc_info=True
-            )
-
-    async def get_recent_memories(
+    def get_recent_memories(
         self: "SymbolicMemory", n: int = 10
     ) -> List[MemoryEntryModel]:
+        """Get recent memories synchronously since no async operations are needed."""
         sorted_memories = sorted(self.memory_map.values(), key=lambda m: m.timestamp, reverse=True)
         return sorted_memories[:n]
 
@@ -431,7 +509,7 @@ Respond with ONLY the summary text.
         if query_embedding.size == 0:
             return []
 
-        distances, ids = self.faiss_index.search(query_embedding.astype('float32'), limit * 2)
+        _, ids = self.faiss_index.search(query_embedding.astype('float32'), limit * 2)
 
         relevant_memories: List[MemoryEntryModel] = []
         for db_id in ids[0]:
@@ -454,7 +532,8 @@ Respond with ONLY the summary text.
             try:
                 await self._flush_task
             except asyncio.CancelledError:
-                pass
+                logging.info("Cleanup task cancellation handled gracefully.")
+                raise  # Critical: Ensure proper cancellation propagation
         
         # Flush any remaining memories
         if self._embedding_buffer:

@@ -19,37 +19,104 @@ if TYPE_CHECKING:
 
 class EmotionalState:
     """Represents the AGI's emotional state."""
-    def __init__(self):
-        self.frustration: float = 0.0
-        self.excitement: float = 0.5
-        self.confidence: float = 0.7
-        self.anxiety: float = 0.2
+    def __init__(self, on_change_callback=None):
+        self._frustration: float = 0.0
+        self._confidence: float = 0.5
+        self._anxiety: float = 0.0
+        self._excitement: float = 0.0
+        self._curiosity: float = 0.5
+        self._on_change = on_change_callback
+
+    @property
+    def frustration(self) -> float:
+        return self._frustration
+    
+    @frustration.setter
+    def frustration(self, value: float):
+        self._frustration = max(0.0, min(1.0, value))
+        if self._on_change:
+            self._on_change()
+
+    @property
+    def confidence(self) -> float:
+        return self._confidence
+    
+    @confidence.setter
+    def confidence(self, value: float):
+        self._confidence = max(0.0, min(1.0, value))
+        if self._on_change:
+            self._on_change()
+
+    @property
+    def anxiety(self) -> float:
+        return self._anxiety
+    
+    @anxiety.setter
+    def anxiety(self, value: float):
+        self._anxiety = max(0.0, min(1.0, value))
+        if self._on_change:
+            self._on_change()
+
+    @property
+    def excitement(self) -> float:
+        return self._excitement
+    
+    @excitement.setter
+    def excitement(self, value: float):
+        self._excitement = max(0.0, min(1.0, value))
+        if self._on_change:
+            self._on_change()
+
+    @property
+    def curiosity(self) -> float:
+        return self._curiosity
+    
+    @curiosity.setter
+    def curiosity(self, value: float):
+        self._curiosity = max(0.0, min(1.0, value))
+        if self._on_change:
+            self._on_change()
 
     def to_dict(self) -> Dict[str, float]:
         return {
             "frustration": self.frustration,
-            "excitement": self.excitement,
             "confidence": self.confidence,
-            "anxiety": self.anxiety
+            "anxiety": self.anxiety,
+            "excitement": self.excitement,
+            "curiosity": self.curiosity
         }
 
-    def from_dict(self, data: Dict[str, float]) -> None:
-        self.frustration = data.get("frustration", 0.0)
-        self.excitement = data.get("excitement", 0.5)
-        self.confidence = data.get("confidence", 0.7)
-        self.anxiety = data.get("anxiety", 0.2)
+    @classmethod
+    def from_dict(cls, data: Dict[str, float]) -> "EmotionalState":
+        state = cls()
+        state._frustration = data.get("frustration", 0.0)
+        state._confidence = data.get("confidence", 0.5)
+        state._anxiety = data.get("anxiety", 0.0)
+        state._excitement = data.get("excitement", 0.0)
+        state._curiosity = data.get("curiosity", 0.5)
+        return state
+
+    def update_from_dict(self, data: Dict[str, float]) -> None:
+        """Update this instance from a dictionary."""
+        self._frustration = data.get("frustration", self._frustration)
+        self._confidence = data.get("confidence", self._confidence)
+        self._anxiety = data.get("anxiety", self._anxiety)
+        self._excitement = data.get("excitement", self._excitement)
+        self._curiosity = data.get("curiosity", self._curiosity)
 
 
 class Consciousness:
     """Manages the AGI's narrative self-model and core drives."""
 
-    def __init__(self, db_path: str = config.DB_PATH):
+    def __init__(self, db_path: str = config.DB_PATH, message_bus=None):
         self._db_path = db_path
         self.drives: Dict[str, float] = {}
         self.life_story: Deque[LifeEvent] = deque(maxlen=200)
-        self.emotional_state = EmotionalState()
+        self.emotional_state = EmotionalState(on_change_callback=self._mark_dirty)
         self._is_dirty: bool = False
         self._save_lock = asyncio.Lock()
+        self.message_bus = message_bus
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     @classmethod
     async def create(cls, db_path: str = config.DB_PATH) -> "Consciousness":
@@ -114,7 +181,7 @@ class Consciousness:
                 rows = await cursor.fetchall()
                 if rows:
                     emotional_data = {row[0]: row[1] for row in rows}
-                    self.emotional_state.from_dict(emotional_data)
+                    self.emotional_state.update_from_dict(emotional_data)
 
             # Load life story
             async with db.execute(
@@ -174,7 +241,11 @@ class Consciousness:
         self._is_dirty = True
         return event
 
-    async def get_narrative(self) -> str:
+    def _mark_dirty(self) -> None:
+        """Mark the consciousness as dirty so it will be saved."""
+        self._is_dirty = True
+
+    def get_narrative(self) -> str:
         """Constructs a narrative string from the most recent and important life events."""
         recent_events = list(self.life_story)[-20:]
 
@@ -267,7 +338,9 @@ your active drives, and what you want most right now.
         if success:
             self.emotional_state.frustration *= 0.7
             self.emotional_state.anxiety *= 0.8
-            self.emotional_state.confidence = min(1.0, self.emotional_state.confidence + 0.1 * task_difficulty)
+            # Increased confidence boost - harder tasks give more confidence
+            confidence_boost = 0.2 + (0.1 * task_difficulty)  # Base 0.2 + up to 0.1 more for harder tasks
+            self.emotional_state.confidence = min(1.0, self.emotional_state.confidence + confidence_boost)
             self.emotional_state.excitement = min(1.0, self.emotional_state.excitement + 0.15)
         else:
             self.emotional_state.frustration = min(1.0, self.emotional_state.frustration + 0.2 * task_difficulty)
@@ -311,18 +384,19 @@ your active drives, and what you want most right now.
                 experience_type,
                 "success" if success else "failure",
             )
+
     async def _execute_planning_cycle(self) -> None:
         """Executes one planning cycle."""
         await self._update_metrics("planning_cycles", 1)
 
         # Check and regulate emotional state before planning
-        await self.consciousness.regulate_emotional_extremes()
+        await self.regulate_emotional_extremes()
         
         # Generate goal based on current state and emotions
         current_goal = await self._generate_goal()
         if not current_goal:
             self.logger.warning("Failed to generate goal")
-            self.consciousness.update_emotional_state_from_outcome(
+            self.update_emotional_state_from_outcome(
                 success=False, task_difficulty=0.3
             )
             return
@@ -331,8 +405,8 @@ your active drives, and what you want most right now.
         self.logger.info(
             "Generated goal: %s (frustration: %.2f, confidence: %.2f)",
             current_goal.description,
-            self.consciousness.emotional_state.frustration,
-            self.consciousness.emotional_state.confidence
+            self.emotional_state.frustration,
+            self.emotional_state.confidence
         )
 
         # Check ethical constraints
@@ -346,20 +420,20 @@ your active drives, and what you want most right now.
                 ethical_check.reasoning
             )
             # Update emotional state for rejection
-            self.consciousness.update_emotional_state_from_outcome(
+            self.update_emotional_state_from_outcome(
                 success=False, task_difficulty=0.5
             )
             
             # If frustration is building, add a life event
-            if self.consciousness.emotional_state.frustration > 0.6:
-                await self.consciousness.inner_monologue(
+            if self.emotional_state.frustration > 0.6:
+                await self.inner_monologue(
                     f"My goal '{current_goal.description}' was rejected. "
                     f"I need to find a different approach."
                 )
             return
 
         # Goal approved - update emotional state positively
-        self.consciousness.update_emotional_state_from_outcome(
+        self.update_emotional_state_from_outcome(
             success=True, task_difficulty=0.3
         )
         
@@ -367,7 +441,7 @@ your active drives, and what you want most right now.
         plan = await self.planner.create_plan(current_goal)
         if not plan or not plan.steps:
             self.logger.warning("Failed to create plan for goal")
-            self.consciousness.update_emotional_state_from_outcome(
+            self.update_emotional_state_from_outcome(
                 success=False, task_difficulty=0.4
             )
             return
@@ -376,14 +450,14 @@ your active drives, and what you want most right now.
         result = await self._execute_plan_with_monitoring(plan, current_goal)
         
         # Update emotional state based on execution result
-        if result and result.status == ExecutionStatus.COMPLETED:
-            self.consciousness.update_emotional_state_from_outcome(
+        if result and result.get("status") == "success":
+            self.update_emotional_state_from_outcome(
                 success=True, task_difficulty=0.6
             )
         else:
-            self.consciousness.update_emotional_state_from_outcome(
+            self.update_emotional_state_from_outcome(
                 success=False, task_difficulty=0.6
-    )
+            )
         
     def get_strongest_drive(self) -> Tuple[str, float]:
         """Returns the name and value of the currently strongest drive."""
@@ -403,7 +477,7 @@ your active drives, and what you want most right now.
         self._is_dirty = True
         await self._save_state()
 
-    async def get_drive_value(self, drive_name: str) -> float:
+    def get_drive_value(self, drive_name: str) -> float:
         """Gets the current value of a specific drive."""
         return self.drives.get(drive_name, 0.0)
 
@@ -413,4 +487,19 @@ your active drives, and what you want most right now.
             await self._save_state()
         logging.info("Consciousness state saved on shutdown.")
 
-    
+    def perceive(self, context):
+        """Process perception with emotional influence"""
+        # High anxiety makes the agent more cautious
+        if self.emotional_state.anxiety > 0.7:
+            return {
+                "perception": "cautious",
+                "risk_assessment": "high",
+                "emotional_context": self.emotional_state.to_dict()
+            }
+        
+        return {
+            "perception": "normal",
+            "risk_assessment": "moderate",
+            "emotional_context": self.emotional_state.to_dict()
+        }
+

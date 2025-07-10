@@ -9,6 +9,12 @@ from pydantic import TypeAdapter, ValidationError
 # Import only schema types directly
 from .schemas import ActionStep, GoalMode, PlannerOutput
 
+# Configuration constants
+MAX_PLANNING_TOKENS = 2000
+PLAN_VALIDATION_RETRIES = 3
+PLAN_COMPLEXITY_THRESHOLD = 10
+PLAN_STEP_TIMEOUT = 30  # seconds
+
 # Use TYPE_CHECKING to break circular imports at runtime
 if TYPE_CHECKING:
     from .agent_pool import DynamicAgentPool
@@ -36,8 +42,8 @@ class Planner:
         self.agent_pool = agent_pool
         self.tools = tool_plugin
 
-    async def _validate_and_repair_plan(
-        self, plan: list[dict[str, Any]], goal_description: str
+    def _validate_and_repair_plan(
+        self, plan: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """
         Validates that each step in a plan has a valid action for its assigned persona.
@@ -145,7 +151,7 @@ EMOTIONAL PLANNING GUIDELINES:
             response = await self.introspector.reason_with_context(
                 prompt=prompt,
                 context_type="planning",
-                max_tokens=2000
+                max_tokens=MAX_PLANNING_TOKENS
             )
 
             # Parse the JSON response
@@ -154,7 +160,7 @@ EMOTIONAL PLANNING GUIDELINES:
             plan_steps = plan_data.get("plan", [])
 
             # Validate and repair the plan
-            validated_plan = await self._validate_and_repair_plan(plan_steps, goal_description)
+            validated_plan = self._validate_and_repair_plan(plan_steps)
 
             if not validated_plan:
                 logging.error("[Planner] Failed to generate valid plan for goal: %s", goal_description)
@@ -261,10 +267,10 @@ EMOTIONAL PLANNING GUIDELINES:
         
         return {
             "available_actions": len(all_actions),
-            "supported_personas": list(set(
+            "supported_personas": list({
                 action.get("persona", "unknown") 
                 for action in all_actions.values()
-            )),
+            }),
             "skills_available": len(self.skills.learned_skills),
             "innate_actions": len(self.skills.innate_actions)
         }

@@ -219,9 +219,8 @@ class DynamicAgentPool:
                     score += reliability_bonus
                 
                 # When low confidence, avoid risky agents
-                if confidence < 0.4:
-                    if consecutive_failures > 1:
-                        score -= 0.15
+                if confidence < 0.4 and consecutive_failures > 1:
+                    score -= 0.15
             
             scored_agents.append((score, agent["name"]))
         
@@ -249,7 +248,7 @@ class DynamicAgentPool:
         personas: set[str] = {
             agent.get("persona", "unknown") for agent in self.subagents.values()
         }
-        return sorted(list(personas))
+        return sorted(personas)
 
     def get_all_action_definitions(self) -> list[dict[str, Any]]:
         """Gets a list of all available actions (innate and learned)."""

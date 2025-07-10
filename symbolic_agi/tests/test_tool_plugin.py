@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 import tempfile
@@ -10,8 +11,8 @@ from symbolic_agi.tool_plugin import ToolPlugin
 from symbolic_agi.agi_controller import SymbolicAGI
 
 
-@pytest.fixture
-async def tool_setup():
+@pytest.fixture(scope="function")
+def tool_setup():
     """Set up test environment with mocked AGI and ToolPlugin."""
     temp_dir = tempfile.mkdtemp()
     mock_agi = Mock()
@@ -21,14 +22,13 @@ async def tool_setup():
     
     # Create the ToolPlugin with the AGI mock
     tool = ToolPlugin(mock_agi)
-    
-    # Override workspace_dir to use temp_dir
     tool.workspace_dir = temp_dir
     
     yield tool, mock_agi, temp_dir
     
-    # Cleanup
-    shutil.rmtree(temp_dir, ignore_errors=True)
+    # Simple synchronous cleanup
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestToolPlugin:

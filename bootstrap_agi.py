@@ -7,6 +7,11 @@ Run this to bootstrap your AGI with initial drives and goals
 import asyncio
 import sys
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Add the project root to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +22,7 @@ from symbolic_agi.schemas import GoalModel, ActionStep
 async def bootstrap_agi():
     """Give the AGI some initial goals to get it started."""
     
-    print("🚀 Bootstrapping AGI with initial motivation...")
+    logger.info("🚀 Bootstrapping AGI with initial motivation...")
     
     try:
         # Create the AGI
@@ -57,7 +62,7 @@ async def bootstrap_agi():
                 original_plan=plan
             )
             await agi.ltm.add_goal(goal)
-            print(f"✅ Added goal: {goal.description}")
+            logger.info("✅ Added goal: %s", goal.description)
         
         # Boost the consciousness drives to motivate action
         if agi.consciousness:
@@ -73,11 +78,11 @@ async def bootstrap_agi():
                         agi.consciousness.drives['curiosity'] = 0.8
                         agi.consciousness.drives['autonomy'] = 0.7
                         agi.consciousness.drives['growth'] = 0.6
-                    print("🧠 Boosted consciousness drives")
+                    logger.info("🧠 Boosted consciousness drives")
                 else:
-                    print("🧠 Consciousness exists but no drives found")
+                    logger.warning("🧠 Consciousness exists but no drives found")
             except Exception as e:
-                print(f"🧠 Consciousness drives not accessible: {e}")
+                logger.warning("🧠 Consciousness drives not accessible: %s", e)
             
             # Add some life events to give context
             try:
@@ -86,28 +91,28 @@ async def bootstrap_agi():
                     importance=0.9
                 )
             except Exception as e:
-                print(f"🧠 Could not add life event: {e}")
+                logger.warning("🧠 Could not add life event: %s", e)
         
-        print("🎯 AGI bootstrapped successfully!")
-        print("💡 Your AGI now has motivation and goals to pursue!")
+        logger.info("🎯 AGI bootstrapped successfully!")
+        logger.info("💡 Your AGI now has motivation and goals to pursue!")
         
         await agi.shutdown()
         
     except Exception as e:
-        print(f"❌ Error bootstrapping AGI: {e}")
+        logger.error("❌ Error bootstrapping AGI: %s", e)
         return 1
     
     return 0
 
 if __name__ == "__main__":
-    print("🧠 AGI Motivation Bootstrapper")
-    print("This will give your AGI some initial goals and drives")
-    print()
+    logger.info("🧠 AGI Motivation Bootstrapper")
+    logger.info("This will give your AGI some initial goals and drives")
+    logger.info("")
     
     exit_code = asyncio.run(bootstrap_agi())
     
     if exit_code == 0:
-        print("\n🚀 Now run your AGI again with: python launch_agi.py")
-        print("Your AGI should now have motivation to act!")
+        logger.info("\n🚀 Now run your AGI again with: python launch_agi.py")
+        logger.info("Your AGI should now have motivation to act!")
     
     sys.exit(exit_code)

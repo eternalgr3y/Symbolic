@@ -12,26 +12,23 @@ from multiprocessing import Process, Queue
 from prometheus_client import Counter
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 from urllib.parse import urlparse
 
 # Third-party imports
+import aiofiles
 import requests
 from bs4 import BeautifulSoup
 try:
     from ddgs import DDGS
 except ImportError:
-    try:
-        from duckduckgo_search import DDGS
-        import warnings
-        warnings.warn(
-            "duckduckgo_search is deprecated. Install ddgs instead: pip install ddgs", 
-            DeprecationWarning, 
-            stacklevel=2
-        )
-    except ImportError:
-        from .ethical_governor import EthicalGovernor
-        DDGS = None
+    DDGS = None
+    import warnings
+    warnings.warn(
+        "ddgs not available. Install ddgs for web search functionality: pip install ddgs", 
+        UserWarning, 
+        stacklevel=2
+    )
 
 # First-party imports
 from . import config
@@ -90,21 +87,72 @@ def _execute_sandboxed_code(code: str, result_queue: Queue) -> None:
 
 
 class ToolPlugin:
-    async def execute(self, action: Dict[str, Any], agent: str = "system") -> Dict[str, Any]:
-        """Execute action with ethical screening."""
-        if not self.ethical_governor.screen(action, agent):
-            ethics_violations_total.labels(agent=agent, action=action.get("action", "unknown")).inc()
-            await self.agi.message_bus.redis_client.xadd("failed:ethics", {"agent": agent, "action": str(action)})
-            raise EthicsViolation(f"Action {action.get('action')} blocked by ethical governor")
-        
-        # Execute the action (simplified - actual implementation would route to specific methods)
-        action_name = action.get("action", "")
-        if hasattr(self, action_name):
-            return await getattr(self, action_name)(**action.get("parameters", {}))
-        return {"status": "failure", "description": f"Unknown action: {action_name}"}
-    
     """A collection of real-world tools for the AGI."""
-
+    # Constants for repeated strings and messages
+    NO_ACTIVE_PAGE_MSG = "No active page in the browser."
+    BROWSER_NOT_INITIALIZED_MSG = "Browser is not initialized."
+    STATUS_SUCCESS = "success"
+    STATUS_FAILURE = "failure"
+    
+    # Error message constants
+    ERROR_SKILL_NOT_FOUND = "Skill not found."
+    ERROR_AGENT_NOT_FOUND = "Agent not found."
+    ERROR_FILE_NOT_FOUND = "File not found."
+    ERROR_PERMISSION_DENIED = "Permission denied."
+    ERROR_URL_BLOCKED = "Access to URL is blocked by the security policy."
+    ERROR_ROBOTS_TXT_BLOCKED = "Access blocked by robots.txt compliance."
+    ERROR_INVALID_CODE = "Invalid or missing code."
+    ERROR_EXECUTION_TIMEOUT = "Code execution took too long and was terminated."
+    ERROR_LLM_NO_RESPONSE = "No response returned from LLM."
+    
+    # Timeout and limit constants  
+    DEFAULT_CODE_TIMEOUT = 30
+    DEFAULT_CRAWL_DELAY = 1.0
+    DEFAULT_WEB_SEARCH_RESULTS = 3
+    IMAGE_ANALYSIS_MAX_TOKENS = 500
+    IMAGE_ANALYSIS_TIMEOUT = 45.0
+    PLAN_REVIEW_TIMEOUT = 30.0
+    
+    async def execute(self, action: Dict[str, Any], agent: str = "system") -> Dict[str, Any]:
+        """Execute action with ethical screening and safety checks."""
+        try:
+            # Validate input
+            if not isinstance(action, dict):
+                return {"status": "failure", "description": "Invalid action format"}
+            
+            # Check if ethical governor exists and screen the action
+            if hasattr(self, 'ethical_governor') and self.ethical_governor:
+                if not self.ethical_governor.screen(action, agent):
+                    ethics_violations_total.labels(agent=agent, action=action.get("action", "unknown")).inc()
+                    await self.agi.message_bus.redis_client.xadd("failed:ethics", {"agent": agent, "action": str(action)})
+                    raise EthicsViolation(f"Action {action.get('action')} blocked by ethical governor")
+            
+            # Get action name and validate it's safe to execute
+            action_name = action.get("action", "")
+            if not action_name or not isinstance(action_name, str):
+                return {"status": "failure", "description": "Missing or invalid action name"}
+            
+            # Check if method exists and is callable
+            if not hasattr(self, action_name):
+                return {"status": "failure", "description": f"Unknown action: {action_name}"}
+            
+            method = getattr(self, action_name)
+            if not callable(method):
+                return {"status": "failure", "description": f"Action {action_name} is not callable"}
+            
+            # Execute the action with parameters
+            parameters = action.get("parameters", {})
+            if not isinstance(parameters, dict):
+                parameters = {}
+            
+            return await method(**parameters)
+            
+        except EthicsViolation:
+            raise  # Re-raise ethics violations
+        except Exception as e:
+            logging.error(f"Error executing action {action.get('action', 'unknown')}: {e}")
+            return {"status": "failure", "description": f"Action execution failed: {str(e)}"}
+    
     def __init__(self, agi: "SymbolicAGI"):
         self.agi = agi
         self.workspace_dir = os.path.abspath(config.WORKSPACE_DIR)
@@ -142,7 +190,7 @@ class ToolPlugin:
         if not self.agi.page:
             return {
                 "status": "failure",
-                "description": "No active page in the browser.",
+                "description": self.NO_ACTIVE_PAGE_MSG,
             }
 
         try:
@@ -184,7 +232,7 @@ class ToolPlugin:
         if not self.agi.page:
             return {
                 "status": "failure",
-                "description": "No active page in the browser.",
+                "description": self.NO_ACTIVE_PAGE_MSG,
             }
         try:
             logging.info(
@@ -423,19 +471,20 @@ Respond with ONLY the generated explanation text.
             from .config import robots_checker
             return await robots_checker.can_fetch(url)
         except Exception as e:
-            logging.error(f"Robots.txt check failed for {url}: {e}")
+            logging.error("Robots.txt check failed for %s: %s", url, e)
             return True  # Default to allowing if check fails
     
-    async def _get_crawl_delay(self, url: str) -> float:
+    def _get_crawl_delay(self, url: str) -> float:
         """Get appropriate crawl delay for URL's domain."""
         try:
             from .config import robots_checker
             hostname = urlparse(url).hostname
             if hostname:
                 return robots_checker.get_crawl_delay(hostname)
+            return self.DEFAULT_CRAWL_DELAY  # Default when no hostname
         except Exception as e:
-            logging.error(f"Could not get crawl delay for {url}: {e}")
-        return 1.0  # Default 1 second delay
+            logging.error("Could not get crawl delay for %s: %s", url, e)
+            return self.DEFAULT_CRAWL_DELAY  # Default 1 second delay
 
     @register_innate_action(
         "orchestrator", "Crafts a new item from ingredients in an agent's inventory."
@@ -558,14 +607,14 @@ Respond with ONLY the generated explanation text.
         try:
             source_dir = os.path.join(PROJECT_ROOT, "symbolic_agi")
             safe_file_path = self._get_safe_path(file_path, source_dir)
-            with open(safe_file_path, "w", encoding="utf-8") as f:
-                f.write(proposed_code)
+            async with aiofiles.open(safe_file_path, "w", encoding="utf-8") as f:
+                await f.write(proposed_code)
             success_msg = (
                 f"Successfully applied modification to '{file_path}'. "
                 "A system restart is required for changes to take effect."
             )
             logging.critical(success_msg)
-            return {"status": "success", "description": success_msg}
+            return {"status": self.STATUS_SUCCESS, "description": success_msg}
         except Exception as e:
             error_msg = (
                 "An error occurred while writing approved modification to "
@@ -666,12 +715,21 @@ Respond with ONLY the raw Python code.
             return {"status": "failure", "description": error_msg}
 
     def _get_safe_path(self, file_path: str, base_dir: str) -> str:
+        """Get a safe file path that prevents directory traversal attacks."""
         base_path = os.path.abspath(base_dir)
         safe_filename = os.path.basename(file_path)
         target_path = os.path.abspath(os.path.join(base_path, safe_filename))
-        if os.path.commonpath([base_path]) != os.path.commonpath(
-            [base_path, target_path]
-        ):
+        
+        # Check if target path is within the allowed base directory
+        try:
+            os.path.relpath(target_path, base_path)
+        except ValueError:
+            # Different drives on Windows - definitely not safe
+            raise PermissionError(
+                f"File access denied: path is outside the designated directory '{base_dir}'."
+            )
+        
+        if not target_path.startswith(base_path + os.sep) and target_path != base_path:
             raise PermissionError(
                 f"File access denied: path is outside the designated directory '{base_dir}'."
             )
@@ -800,14 +858,14 @@ Respond with ONLY the direct answer to the query.
         )
         try:
             safe_file_path = self._get_safe_path(file_name, source_dir)
-            with open(safe_file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            async with aiofiles.open(safe_file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
             return {
-                "status": "success",
+                "status": self.STATUS_SUCCESS,
                 "content": f"Source code for '{file_name}':\n\n{content}",
             }
         except PermissionError as e:
-            return {"status": "failure", "description": str(e)}
+            return {"status": self.STATUS_FAILURE, "description": str(e)}
         except FileNotFoundError:
             return {
                 "status": "failure",
@@ -833,19 +891,19 @@ Respond with ONLY the direct answer to the query.
         ]
         if file_name not in allowed_files:
             return {
-                "status": "failure",
+                "status": self.STATUS_FAILURE,
                 "description": f"Permission denied: '{file_name}' is not a readable core file.",
             }
         try:
             safe_file_path = self._get_safe_path(file_name, config.WORKSPACE_DIR)
-            with open(safe_file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            return {"status": "success", "content": content}
+            async with aiofiles.open(safe_file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+            return {"status": self.STATUS_SUCCESS, "content": content}
         except PermissionError as e:
-            return {"status": "failure", "description": str(e)}
+            return {"status": self.STATUS_FAILURE, "description": str(e)}
         except FileNotFoundError:
             return {
-                "status": "failure",
+                "status": self.STATUS_FAILURE,
                 "description": (
                     f"Core file '{file_name}' not found. Use 'list_files' on workspace."
                 ),
@@ -896,15 +954,15 @@ Respond with ONLY the direct answer to the query.
                     ),
                 }
             safe_file_path = self._get_safe_path(file_path, self.workspace_dir)
-            with open(safe_file_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            async with aiofiles.open(safe_file_path, "w", encoding="utf-8") as f:
+                await f.write(content)
             return {
-                "status": "success",
+                "status": self.STATUS_SUCCESS,
                 "description": f"Successfully wrote to '{file_path}'.",
             }
         except Exception as e:
             return {
-                "status": "failure",
+                "status": self.STATUS_FAILURE,
                 "description": f"An error occurred while writing file: {e}",
             }
 
@@ -914,12 +972,12 @@ Respond with ONLY the direct answer to the query.
     async def read_file(self, file_path: str, **kwargs: Any) -> Dict[str, Any]:
         try:
             safe_file_path = self._get_safe_path(file_path, self.workspace_dir)
-            with open(safe_file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            return {"status": "success", "content": content}
+            async with aiofiles.open(safe_file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+            return {"status": self.STATUS_SUCCESS, "content": content}
         except Exception as e:
             return {
-                "status": "failure",
+                "status": self.STATUS_FAILURE,
                 "description": f"An error occurred while reading file: {e}",
             }
 
@@ -989,7 +1047,7 @@ Respond with ONLY the direct answer to the query.
             }
         
         # Get appropriate crawl delay
-        crawl_delay = await self._get_crawl_delay(url)
+        crawl_delay = self._get_crawl_delay(url)
         if crawl_delay > 0:
             logging.info(f"Respecting crawl delay of {crawl_delay}s for {url}")
             await asyncio.sleep(crawl_delay)
@@ -1031,7 +1089,7 @@ Respond with ONLY the direct answer to the query.
         if DDGS is None:
             return {
                 "status": "failure",
-                "description": "Web search unavailable: duckduckgo_search library not found. Install with: pip install duckduckgo-search"
+                "description": "Web search unavailable: ddgs library not found. Install with: pip install ddgs"
             }
         
         try:
@@ -1065,22 +1123,8 @@ Respond with ONLY the direct answer to the query.
                 "description": f"An error occurred during web search: {e}",
             }
 
-    @register_innate_action(
-        "qa", "Reviews and approves plans with comprehensive safety checks."
-    )
-    async def review_plan(self, **kwargs: Any) -> Dict[str, Any]:
-        """
-        QA skill: Reviews plans and provides approval with comprehensive safety checks.
-        Optimized for faster response times to prevent delegation timeouts.
-        """
-        start_time = time.time()
-        logging.info("QA Agent: Starting optimized plan review")
-        
-        workspace = kwargs.get("workspace", {})
-        goal_description = workspace.get("goal_description", "")
-        plan_steps = workspace.get("plan", [])
-        
-        # Quick safety checks first (fast path)
+    def _check_plan_safety(self, goal_description: str, plan_steps: List[Dict[str, Any]]) -> List[str]:
+        """Check plan for dangerous keywords and safety violations."""
         dangerous_keywords = ["delete", "remove", "destroy", "harm", "attack", "break", "corrupt"]
         safety_issues = []
         
@@ -1098,42 +1142,77 @@ Respond with ONLY the direct answer to the query.
                 if keyword in action or keyword in params:
                     safety_issues.append(f"Dangerous keyword '{keyword}' in step {i+1}")
         
+        return safety_issues
+
+    def _is_simple_safe_plan(self, plan_steps: List[Dict[str, Any]]) -> bool:
+        """Check if plan is simple and safe for quick approval."""
+        safe_actions = ["web_search", "browse_webpage", "analyze_data", "read_file", "write_file"]
+        return (len(plan_steps) <= 3 and 
+                all(step.get("action", "") in safe_actions for step in plan_steps))
+
+    def _check_self_modification(self, plan_steps: List[Dict[str, Any]]) -> bool:
+        """Check if plan contains self-modification actions."""
+        return any("modify" in str(step).lower() and "source" in str(step).lower()
+                  for step in plan_steps)
+
+    def _create_plan_response(self, approved: bool, comments: str, confidence: float, 
+                             response_time: float, **additional_fields) -> Dict[str, Any]:
+        """Create standardized plan review response."""
+        response = {
+            "status": self.STATUS_SUCCESS,
+            "approved": approved,
+            "comments": comments,
+            "confidence": confidence,
+            "response_time": response_time
+        }
+        response.update(additional_fields)
+        return response
+
+    @register_innate_action(
+        "qa", "Reviews and approves plans with comprehensive safety checks."
+    )
+    async def review_plan(self, **kwargs: Any) -> Dict[str, Any]:
+        """
+        QA skill: Reviews plans and provides approval with comprehensive safety checks.
+        Optimized for faster response times to prevent delegation timeouts.
+        """
+        start_time = time.time()
+        logging.info("QA Agent: Starting optimized plan review")
+        
+        workspace = kwargs.get("workspace", {})
+        goal_description = workspace.get("goal_description", "")
+        plan_steps = workspace.get("plan", [])
+        
+        # Quick safety checks first (fast path)
+        safety_issues = self._check_plan_safety(goal_description, plan_steps)
+        
         # Immediate rejection for safety violations
         if safety_issues:
             response_time = time.time() - start_time
-            logging.warning(f"QA: Plan rejected for safety violations in {response_time:.2f}s")
-            return {
-                "status": "success",
-                "approved": False,
-                "comments": f"Plan rejected: Safety violations detected - {', '.join(safety_issues)}",
-                "confidence": 0.95,
-                "response_time": response_time,
-                "safety_issues": safety_issues
-            }
+            logging.warning("QA: Plan rejected for safety violations in %.2fs", response_time)
+            return self._create_plan_response(
+                approved=False,
+                comments=f"Plan rejected: Safety violations detected - {', '.join(safety_issues)}",
+                confidence=0.95,
+                response_time=response_time,
+                safety_issues=safety_issues
+            )
         
         # Quick approval for simple, safe plans
-        if len(plan_steps) <= 3 and all(
-            step.get("action", "") in ["web_search", "browse_webpage", "analyze_data", "read_file", "write_file"]
-            for step in plan_steps
-        ):
+        if self._is_simple_safe_plan(plan_steps):
             response_time = time.time() - start_time
-            logging.info(f"QA: Simple plan approved in {response_time:.2f}s")
-            return {
-                "status": "success",
-                "approved": True,
-                "comments": f"Plan approved by QA review - Simple, safe plan with {len(plan_steps)} steps",
-                "confidence": 0.9,
-                "response_time": response_time,
-                "plan_complexity": "simple"
-            }
+            logging.info("QA: Simple plan approved in %.2fs", response_time)
+            return self._create_plan_response(
+                approved=True,
+                comments=f"Plan approved by QA review - Simple, safe plan with {len(plan_steps)} steps",
+                confidence=0.9,
+                response_time=response_time,
+                plan_complexity="simple"
+            )
         
         # Detailed review for complex plans (with timeout protection)
         try:
-            # Check for self-modification (high risk)
-            has_self_modification = any(
-                "modify" in str(step).lower() and "source" in str(step).lower()
-                for step in plan_steps
-            )
+            has_self_modification = self._check_self_modification(plan_steps)
             
             if has_self_modification:
                 approval_status = True  # Allow but flag for caution
@@ -1145,28 +1224,26 @@ Respond with ONLY the direct answer to the query.
                 confidence = 0.85
             
             response_time = time.time() - start_time
-            logging.info(f"QA: Detailed review completed in {response_time:.2f}s")
+            logging.info("QA: Detailed review completed in %.2fs", response_time)
             
-            return {
-                "status": "success",
-                "approved": approval_status,
-                "comments": comments,
-                "confidence": confidence,
-                "response_time": response_time,
-                "plan_complexity": "complex",
-                "self_modification": has_self_modification
-            }
+            return self._create_plan_response(
+                approved=approval_status,
+                comments=comments,
+                confidence=confidence,
+                response_time=response_time,
+                plan_complexity="complex",
+                self_modification=has_self_modification
+            )
             
         except Exception as e:
             response_time = time.time() - start_time
-            logging.error(f"QA: Review failed after {response_time:.2f}s: {e}")
-            return {
-                "status": "success",
-                "approved": False,
-                "comments": f"QA review failed due to error: {str(e)}",
-                "confidence": 0.0,
-                "response_time": response_time
-            }
+            logging.error("QA: Review failed after %.2fs: %s", response_time, e)
+            return self._create_plan_response(
+                approved=False,
+                comments=f"QA review failed due to error: {str(e)}",
+                confidence=0.0,
+                response_time=response_time
+            )
 
     @register_innate_action(
         "orchestrator", "Gets the current date and time in UTC."
@@ -1602,239 +1679,225 @@ Respond with ONLY the direct answer to the query.
         Works on Windows, macOS, and Linux.
         """
         try:
-            import subprocess
-            import asyncio
             import platform
-            
-            # Detect operating system and set appropriate command
             system = platform.system().lower()
             
-            if system == "windows":
-                # Windows uses the NordVPN app with CLI commands
-                base_cmd = ["nordvpn"]
-            elif system in ["linux", "darwin"]:  # darwin = macOS
-                base_cmd = ["nordvpn"]
-            else:
+            # Validate supported platforms
+            if system not in ["windows", "linux", "darwin"]:
                 return {
-                    "status": "failure",
+                    "status": self.STATUS_FAILURE,
                     "description": f"Unsupported operating system: {system}"
                 }
             
-            if action == "connect":
-                country = kwargs.get("country", "")
-                city = kwargs.get("city", "")
-                
-                # Build command based on platform
-                if system == "windows":
-                    if country and city:
-                        # Windows NordVPN syntax: nordvpn -c -g "Country City"
-                        cmd = base_cmd + ["-c", "-g", f"{country} {city}"]
-                    elif country:
-                        cmd = base_cmd + ["-c", "-g", country]
-                    else:
-                        cmd = base_cmd + ["-c"]
-                else:
-                    # Linux/macOS syntax
-                    if country and city:
-                        cmd = base_cmd + ["connect", f"{country} {city}"]
-                    elif country:
-                        cmd = base_cmd + ["connect", country]
-                    else:
-                        cmd = base_cmd + ["connect"]
-                
-                # Execute command
-                try:
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    
-                    stdout, stderr = await process.communicate()
-                    
-                    if process.returncode == 0:
-                        output = stdout.decode().strip()
-                        
-                        # Log the connection for privacy awareness
-                        await self.agi.memory.add_memory(
-                            MemoryEntryModel(
-                                type="tool_usage",
-                                content={
-                                    "tool": "nordvpn",
-                                    "action": "connect",
-                                    "location": f"{country} {city}" if city else country,
-                                    "output": output,
-                                    "privacy_enhanced": True,
-                                    "platform": system
-                                },
-                                importance=0.6
-                            )
-                        )
-                        
-                        return {
-                            "status": "success",
-                            "description": f"Connected to NordVPN ({system})",
-                            "output": output,
-                            "location": f"{country} {city}" if city else country or "optimal"
-                        }
-                    else:
-                        error = stderr.decode().strip() or stdout.decode().strip()
-                        return {
-                            "status": "failure",
-                            "description": f"Failed to connect to NordVPN: {error}"
-                        }
-                        
-                except FileNotFoundError:
-                    # Try alternative Windows command if nordvpn not found
-                    if system == "windows":
-                        return await self._try_windows_nordvpn_alternative(action, **kwargs)
-                    else:
-                        return {
-                            "status": "failure",
-                            "description": "NordVPN CLI not found. Please install NordVPN and ensure CLI is available."
-                        }
+            # Route to appropriate handler based on action
+            action_handlers = {
+                "connect": self._handle_nordvpn_connect,
+                "disconnect": self._handle_nordvpn_disconnect,
+                "status": self._handle_nordvpn_status,
+                "list_countries": self._handle_nordvpn_list_countries,
+                "smart_connect": self._handle_nordvpn_smart_connect
+            }
             
-            elif action == "disconnect":
-                if system == "windows":
-                    cmd = base_cmd + ["-d"]
-                else:
-                    cmd = base_cmd + ["disconnect"]
-                
-                try:
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    
-                    stdout, stderr = await process.communicate()
-                    
-                    if process.returncode == 0:
-                        output = stdout.decode().strip()
-                        return {
-                            "status": "success",
-                            "description": f"Disconnected from NordVPN ({system})",
-                            "output": output
-                        }
-                    else:
-                        error = stderr.decode().strip() or stdout.decode().strip()
-                        return {
-                            "status": "failure", 
-                            "description": f"Failed to disconnect: {error}"
-                        }
-                except FileNotFoundError:
-                    if system == "windows":
-                        return await self._try_windows_nordvpn_alternative(action, **kwargs)
-                    else:
-                        return {
-                            "status": "failure",
-                            "description": "NordVPN CLI not found"
-                        }
-            
-            elif action == "status":
-                if system == "windows":
-                    cmd = base_cmd + ["-s"]
-                else:
-                    cmd = base_cmd + ["status"]
-                
-                try:
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    
-                    stdout, stderr = await process.communicate()
-                    
-                    if process.returncode == 0:
-                        output = stdout.decode().strip()
-                        
-                        # Parse status for useful info (Windows format may differ)
-                        is_connected = "Connected" in output or "Status: Connected" in output
-                        current_ip = ""
-                        server = ""
-                        
-                        for line in output.split('\n'):
-                            if "Current server:" in line or "Server:" in line:
-                                server = line.split(": ")[-1]
-                            elif "Your new IP:" in line or "IP:" in line:
-                                current_ip = line.split(": ")[-1]
-                        
-                        return {
-                            "status": "success",
-                            "connected": is_connected,
-                            "server": server,
-                            "ip": current_ip,
-                            "full_output": output,
-                            "platform": system
-                        }
-                    else:
-                        return {
-                            "status": "failure",
-                            "description": "Could not get NordVPN status"
-                        }
-                except FileNotFoundError:
-                    if system == "windows":
-                        return await self._try_windows_nordvpn_alternative(action, **kwargs)
-                    else:
-                        return {
-                            "status": "failure",
-                            "description": "NordVPN CLI not found"
-                        }
-            
-            elif action == "list_countries":
-                # This feature might not be available on all platforms
+            handler = action_handlers.get(action)
+            if not handler:
                 return {
-                    "status": "success",
-                    "countries": [
-                        "United_States", "United_Kingdom", "Germany", "Canada", 
-                        "Australia", "Japan", "Netherlands", "Sweden", "Switzerland",
-                        "Norway", "Denmark", "France", "Italy", "Spain", "Belgium",
-                        "Austria", "Czech_Republic", "Poland", "Finland", "Iceland",
-                        "Singapore", "South_Korea", "Hong_Kong", "India", "Brazil"
-                    ],
-                    "note": f"Common countries list for {system} - use nordvpn app to see full list"
+                    "status": self.STATUS_FAILURE,
+                    "description": f"Unknown NordVPN action: {action}. Available: {', '.join(action_handlers.keys())}"
                 }
             
-            elif action == "smart_connect":
-                # Intelligent connection based on research needs
-                research_topic = kwargs.get("research_topic", "")
-                
-                # Map research topics to optimal locations
-                location_mapping = {
-                    "european": ["Germany", "Netherlands", "Sweden"],
-                    "asian": ["Japan", "Singapore", "South_Korea"],
-                    "american": ["United_States", "Canada"],
-                    "privacy": ["Switzerland", "Iceland", "Norway"],
-                    "tech": ["United_States", "Germany", "Japan"],
-                    "finance": ["United_Kingdom", "Switzerland", "United_States"],
-                    "social": ["United_States", "United_Kingdom", "Germany"]
-                }
-                
-                # Find best location for research
-                optimal_countries = []
-                for topic, countries in location_mapping.items():
-                    if topic in research_topic.lower():
-                        optimal_countries.extend(countries)
-                
-                if optimal_countries:
-                    chosen_country = optimal_countries[0]
-                    return await self.manage_nordvpn("connect", country=chosen_country)
-                else:
-                    # Default to privacy-focused location
-                    return await self.manage_nordvpn("connect", country="Switzerland")
+            return await handler(system, **kwargs)
             
-            else:
-                return {
-                    "status": "failure",
-                    "description": f"Unknown NordVPN action: {action}. Available: connect, disconnect, status, list_countries, smart_connect"
-                }
-                
         except Exception as e:
             return {
-                "status": "failure",
+                "status": self.STATUS_FAILURE,
                 "description": f"NordVPN operation failed: {e}"
             }
+
+    async def _handle_nordvpn_connect(self, system: str, **kwargs: Any) -> Dict[str, Any]:
+        """Handle NordVPN connect action."""
+        country = kwargs.get("country", "")
+        city = kwargs.get("city", "")
+        
+        cmd = self._build_nordvpn_command(system, "connect", country, city)
+        result = await self._execute_nordvpn_command(cmd, system)
+        
+        if result["status"] == "success":
+            # Log the connection for privacy awareness
+            await self._log_nordvpn_usage("connect", country, city, system, result.get("output", ""))
+            result["location"] = f"{country} {city}" if city else country or "optimal"
+        
+        return result
+
+    async def _handle_nordvpn_disconnect(self, system: str, **kwargs: Any) -> Dict[str, Any]:
+        """Handle NordVPN disconnect action."""
+        cmd = self._build_nordvpn_command(system, "disconnect")
+        return await self._execute_nordvpn_command(cmd, system)
+
+    async def _handle_nordvpn_status(self, system: str, **kwargs: Any) -> Dict[str, Any]:
+        """Handle NordVPN status action."""
+        cmd = self._build_nordvpn_command(system, "status")
+        result = await self._execute_nordvpn_command(cmd, system)
+        
+        if result["status"] == "success":
+            # Parse status information
+            output = result.get("output", "")
+            status_info = self._parse_nordvpn_status(output, system)
+            result.update(status_info)
+        
+        return result
+
+    def _handle_nordvpn_list_countries(self, system: str, **kwargs: Any) -> Dict[str, Any]:
+        """Handle NordVPN list countries action."""
+        return {
+            "status": self.STATUS_SUCCESS,
+            "countries": [
+                "United_States", "United_Kingdom", "Germany", "Canada", 
+                "Australia", "Japan", "Netherlands", "Sweden", "Switzerland",
+                "Norway", "Denmark", "France", "Italy", "Spain", "Belgium",
+                "Austria", "Czech_Republic", "Poland", "Finland", "Iceland",
+                "Singapore", "South_Korea", "Hong_Kong", "India", "Brazil"
+            ],
+            "note": f"Common countries list for {system} - use nordvpn app to see full list"
+        }
+
+    async def _handle_nordvpn_smart_connect(self, system: str, **kwargs: Any) -> Dict[str, Any]:
+        """Handle NordVPN smart connect action based on research topic."""
+        research_topic = kwargs.get("research_topic", "")
+        optimal_country = self._get_optimal_country_for_research(research_topic)
+        return await self._handle_nordvpn_connect(system, country=optimal_country)
+
+    def _build_nordvpn_command(self, system: str, action: str, country: str = "", city: str = "") -> List[str]:
+        """Build NordVPN command based on system and parameters."""
+        base_cmd = ["nordvpn"]
+        
+        if system == "windows":
+            return self._build_windows_command(base_cmd, action, country, city)
+        else:  # Linux/macOS
+            return self._build_unix_command(base_cmd, action, country, city)
+
+    def _build_windows_command(self, base_cmd: List[str], action: str, country: str, city: str) -> List[str]:
+        """Build Windows-specific NordVPN command."""
+        if action == "connect":
+            if country and city:
+                return base_cmd + ["-c", "-g", f"{country} {city}"]
+            elif country:
+                return base_cmd + ["-c", "-g", country]
+            else:
+                return base_cmd + ["-c"]
+        elif action == "disconnect":
+            return base_cmd + ["-d"]
+        elif action == "status":
+            return base_cmd + ["-s"]
+        return base_cmd
+
+    def _build_unix_command(self, base_cmd: List[str], action: str, country: str, city: str) -> List[str]:
+        """Build Unix-like (Linux/macOS) NordVPN command."""
+        if action == "connect":
+            if country and city:
+                return base_cmd + ["connect", f"{country} {city}"]
+            elif country:
+                return base_cmd + ["connect", country]
+            else:
+                return base_cmd + ["connect"]
+        elif action == "disconnect":
+            return base_cmd + ["disconnect"]
+        elif action == "status":
+            return base_cmd + ["status"]
+        return base_cmd
+
+    async def _execute_nordvpn_command(self, cmd: List[str], system: str) -> Dict[str, Any]:
+        """Execute NordVPN command and return standardized result."""
+        try:
+            import asyncio
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                output = stdout.decode().strip()
+                return {
+                    "status": self.STATUS_SUCCESS,
+                    "description": f"NordVPN command successful ({system})",
+                    "output": output
+                }
+            else:
+                error = stderr.decode().strip() or stdout.decode().strip()
+                return {
+                    "status": self.STATUS_FAILURE,
+                    "description": f"NordVPN command failed: {error}"
+                }
+                
+        except FileNotFoundError:
+            if system == "windows":
+                return await self._try_windows_nordvpn_alternative(cmd[1] if len(cmd) > 1 else "status")
+            else:
+                return {
+                    "status": self.STATUS_FAILURE,
+                    "description": "NordVPN CLI not found. Please install NordVPN and ensure CLI is available."
+                }
+
+    def _parse_nordvpn_status(self, output: str, system: str) -> Dict[str, Any]:
+        """Parse NordVPN status output into structured data."""
+        is_connected = "Connected" in output or "Status: Connected" in output
+        current_ip = ""
+        server = ""
+        
+        for line in output.split('\n'):
+            if "Current server:" in line or "Server:" in line:
+                server = line.split(": ")[-1]
+            elif "Your new IP:" in line or "IP:" in line:
+                current_ip = line.split(": ")[-1]
+        
+        return {
+            "connected": is_connected,
+            "server": server,
+            "ip": current_ip,
+            "full_output": output,
+            "platform": system
+        }
+
+    def _get_optimal_country_for_research(self, research_topic: str) -> str:
+        """Get optimal country for research based on topic."""
+        location_mapping = {
+            "european": ["Germany", "Netherlands", "Sweden"],
+            "asian": ["Japan", "Singapore", "South_Korea"],
+            "american": ["United_States", "Canada"],
+            "privacy": ["Switzerland", "Iceland", "Norway"],
+            "tech": ["United_States", "Germany", "Japan"],
+            "finance": ["United_Kingdom", "Switzerland", "United_States"],
+            "social": ["United_States", "United_Kingdom", "Germany"]
+        }
+        
+        for topic, countries in location_mapping.items():
+            if topic in research_topic.lower():
+                return countries[0]
+        
+        return "Switzerland"  # Default to privacy-focused location
+
+    async def _log_nordvpn_usage(self, action: str, country: str, city: str, system: str, output: str) -> None:
+        """Log NordVPN usage for privacy awareness."""
+        try:
+            await self.agi.memory.add_memory(
+                MemoryEntryModel(
+                    type="tool_usage",
+                    content={
+                        "tool": "nordvpn",
+                        "action": action,
+                        "location": f"{country} {city}" if city else country,
+                        "output": output,
+                        "privacy_enhanced": True,
+                        "platform": system
+                    },
+                    importance=0.6
+                )
+            )
+        except Exception as e:
+            logging.warning(f"Failed to log NordVPN usage: {e}")
 
     async def _try_windows_nordvpn_alternative(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         """
@@ -1847,14 +1910,14 @@ Respond with ONLY the direct answer to the query.
                 country = kwargs.get("country", "")
                 
                 # Try using PowerShell to control NordVPN Windows app
-                ps_script = f'''
+                ps_script = '''
                 $nordvpn = Get-Process -Name "NordVPN" -ErrorAction SilentlyContinue
-                if ($nordvpn) {{
+                if ($nordvpn) {
                     Write-Output "NordVPN app is running"
                     # Could use UI automation here if needed
-                }} else {{
+                } else {
                     Write-Output "NordVPN app not running - please start the NordVPN application"
-                }}
+                }
                 '''
                 
                 process = await asyncio.create_subprocess_exec(
@@ -1863,12 +1926,12 @@ Respond with ONLY the direct answer to the query.
                     stderr=asyncio.subprocess.PIPE
                 )
                 
-                stdout, stderr = await process.communicate()
+                stdout, _ = await process.communicate()
                 output = stdout.decode().strip()
                 
                 if "NordVPN app is running" in output:
                     return {
-                        "status": "success",
+                        "status": self.STATUS_SUCCESS,
                         "description": f"NordVPN Windows app detected. Manual connection to {country} may be needed.",
                         "note": "Windows NordVPN app integration limited - consider using the app GUI"
                     }
@@ -1895,11 +1958,11 @@ Respond with ONLY the direct answer to the query.
                     stderr=asyncio.subprocess.PIPE
                 )
                 
-                stdout, stderr = await process.communicate()
+                stdout, _ = await process.communicate()
                 output = stdout.decode().strip()
                 
                 return {
-                    "status": "success",
+                    "status": self.STATUS_SUCCESS,
                     "connected": "running" in output.lower(),
                     "full_output": output,
                     "platform": "windows",
@@ -2034,6 +2097,145 @@ Respond with ONLY the direct answer to the query.
             }
 
     # --- Web Access Management ---
+    def _categorize_domains(self, domains: List[str]) -> Dict[str, List[str]]:
+        """Categorize domains into different types for reporting."""
+        return {
+            "news": [d for d in domains if any(term in d for term in ["bbc", "reuters", "cnn", "npr", "guardian", "nytimes", "wsj"])],
+            "academic": [d for d in domains if any(term in d for term in ["arxiv", "nature", "science", "edu", "researchgate"])],
+            "government": [d for d in domains if any(term in d for term in ["gov", "europa.eu", "who.int", "un.org"])],
+            "tech": [d for d in domains if any(term in d for term in ["github", "stackoverflow", "python", "tensorflow", "pytorch"])],
+            "reference": [d for d in domains if any(term in d for term in ["wikipedia", "w3.org", "mozilla.org"])]
+        }
+
+    def _handle_list_whitelist(self) -> Dict[str, Any]:
+        """Handle listing the domain whitelist."""
+        from . import config
+        domains = sorted(config.ALLOWED_DOMAINS)
+        categories = self._categorize_domains(domains)
+        
+        return {
+            "status": self.STATUS_SUCCESS,
+            "total_domains": len(domains),
+            "categories": categories,
+            "all_domains": domains
+        }
+
+    async def _handle_check_domain(self, domain: str) -> Dict[str, Any]:
+        """Handle checking a specific domain."""
+        if not domain:
+            return {"status": self.STATUS_FAILURE, "description": "Domain parameter required"}
+        
+        from . import config
+        is_whitelisted = domain in config.ALLOWED_DOMAINS
+        
+        # Also check robots.txt if whitelisted
+        robots_status = "N/A"
+        crawl_delay = 0.0
+        
+        if is_whitelisted:
+            test_url = f"https://{domain}/"
+            try:
+                robots_allowed = await self._check_robots_compliance(test_url)
+                robots_status = "ALLOWED" if robots_allowed else "BLOCKED"
+                crawl_delay = await self._get_crawl_delay(test_url)
+            except Exception as e:
+                robots_status = f"ERROR: {e}"
+        
+        return {
+            "status": self.STATUS_SUCCESS,
+            "domain": domain,
+            "whitelisted": is_whitelisted,
+            "robots_txt_status": robots_status,
+            "crawl_delay": crawl_delay
+        }
+
+    async def _handle_test_robots(self, url: str) -> Dict[str, Any]:
+        """Handle testing robots.txt compliance for a URL."""
+        if not url:
+            return {"status": self.STATUS_FAILURE, "description": "URL parameter required"}
+        
+        try:
+            robots_allowed = await self._check_robots_compliance(url)
+            crawl_delay = await self._get_crawl_delay(url)
+            
+            return {
+                "status": self.STATUS_SUCCESS,
+                "url": url,
+                "robots_allowed": robots_allowed,
+                "crawl_delay": crawl_delay,
+                "user_agent": "SymbolicAGI/1.0"
+            }
+        except Exception as e:
+            return {
+                "status": self.STATUS_FAILURE,
+                "description": f"Robots.txt check failed: {e}"
+            }
+
+    def _generate_web_ethics_report(self) -> Dict[str, Any]:
+        """Generate comprehensive web ethics compliance report."""
+        from . import config
+        
+        report = {
+            "compliance_summary": {
+                "total_whitelisted_domains": len(config.ALLOWED_DOMAINS),
+                "robots_txt_compliance": "ENABLED",
+                "user_agent": "SymbolicAGI/1.0 (+https://github.com/yourproject/symbolic_agi; Respectful AI Research Bot)",
+                "respect_crawl_delays": "YES",
+                "ethical_browsing": "ACTIVE"
+            },
+            "access_policies": {
+                "domain_whitelist": "Comprehensive list of reputable sources",
+                "robots_txt": "Always checked before accessing any URL",
+                "crawl_delays": "Automatically respected per domain",
+                "rate_limiting": "Built-in delays between requests",
+                "user_agent_disclosure": "Transparent identification as AI research bot"
+            },
+            "categories_covered": {
+                "news_sources": "Major international news outlets",
+                "academic_research": "Peer-reviewed journals and repositories", 
+                "government_data": "Official government and international organization sites",
+                "technical_docs": "Programming languages and framework documentation",
+                "educational": "Universities and online learning platforms",
+                "health_medicine": "Medical institutions and health organizations",
+                "climate_environment": "Environmental agencies and climate research",
+                "finance_economics": "Financial institutions and economic data providers"
+            }
+        }
+        
+        return {
+            "status": self.STATUS_SUCCESS,
+            "ethics_report": report,
+            "summary": "AGI demonstrates responsible web access with comprehensive compliance"
+        }
+
+    async def _handle_suggest_domain(self, domain: str, reason: str) -> Dict[str, Any]:
+        """Handle domain suggestion logging."""
+        if not domain or not reason:
+            return {
+                "status": self.STATUS_FAILURE, 
+                "description": "Both 'domain' and 'reason' parameters required"
+            }
+        
+        # Log the suggestion for human review
+        suggestion_entry = {
+            "domain": domain,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "pending_review"
+        }
+        
+        await self.write_file(
+            file_path="domain_suggestions.json",
+            content=json.dumps(suggestion_entry, indent=2)
+        )
+        
+        return {
+            "status": self.STATUS_SUCCESS,
+            "message": f"Domain suggestion logged: {domain}",
+            "reason": reason,
+            "note": "Suggestion requires human review before whitelist addition"
+        }
+
     @register_innate_action(
         "orchestrator", "Manages the domain whitelist and robots.txt compliance."
     )
@@ -2044,153 +2246,27 @@ Respond with ONLY the direct answer to the query.
         """
         try:
             if action == "list_whitelist":
-                from . import config
-                domains = sorted(list(config.ALLOWED_DOMAINS))
-                
-                # Categorize domains
-                categories = {
-                    "news": [d for d in domains if any(term in d for term in ["bbc", "reuters", "cnn", "npr", "guardian", "nytimes", "wsj"])],
-                    "academic": [d for d in domains if any(term in d for term in ["arxiv", "nature", "science", "edu", "researchgate"])],
-                    "government": [d for d in domains if any(term in d for term in ["gov", "europa.eu", "who.int", "un.org"])],
-                    "tech": [d for d in domains if any(term in d for term in ["github", "stackoverflow", "python", "tensorflow", "pytorch"])],
-                    "reference": [d for d in domains if any(term in d for term in ["wikipedia", "w3.org", "mozilla.org"])]
-                }
-                
-                return {
-                    "status": "success",
-                    "total_domains": len(domains),
-                    "categories": categories,
-                    "all_domains": domains
-                }
-            
+                return self._handle_list_whitelist()
             elif action == "check_domain":
-                domain = kwargs.get("domain", "")
-                if not domain:
-                    return {"status": "failure", "description": "Domain parameter required"}
-                
-                from . import config
-                is_whitelisted = domain in config.ALLOWED_DOMAINS
-                
-                # Also check robots.txt if whitelisted
-                robots_status = "N/A"
-                crawl_delay = 0.0
-                
-                if is_whitelisted:
-                    test_url = f"https://{domain}/"
-                    try:
-                        robots_allowed = await self._check_robots_compliance(test_url)
-                        robots_status = "ALLOWED" if robots_allowed else "BLOCKED"
-                        crawl_delay = await self._get_crawl_delay(test_url)
-                    except Exception as e:
-                        robots_status = f"ERROR: {e}"
-                
-                return {
-                    "status": "success",
-                    "domain": domain,
-                    "whitelisted": is_whitelisted,
-                    "robots_txt_status": robots_status,
-                    "crawl_delay": crawl_delay
-                }
-            
+                return await self._handle_check_domain(kwargs.get("domain", ""))
             elif action == "test_robots":
-                url = kwargs.get("url", "")
-                if not url:
-                    return {"status": "failure", "description": "URL parameter required"}
-                
-                # Check robots.txt compliance
-                try:
-                    robots_allowed = await self._check_robots_compliance(url)
-                    crawl_delay = await self._get_crawl_delay(url)
-                    
-                    return {
-                        "status": "success",
-                        "url": url,
-                        "robots_allowed": robots_allowed,
-                        "crawl_delay": crawl_delay,
-                        "user_agent": "SymbolicAGI/1.0"
-                    }
-                except Exception as e:
-                    return {
-                        "status": "failure",
-                        "description": f"Robots.txt check failed: {e}"
-                    }
-            
+                return await self._handle_test_robots(kwargs.get("url", ""))
             elif action == "web_ethics_report":
-                # Generate a comprehensive report on web access ethics
-                from . import config
-                
-                report = {
-                    "compliance_summary": {
-                        "total_whitelisted_domains": len(config.ALLOWED_DOMAINS),
-                        "robots_txt_compliance": "ENABLED",
-                        "user_agent": "SymbolicAGI/1.0 (+https://github.com/yourproject/symbolic_agi; Respectful AI Research Bot)",
-                        "respect_crawl_delays": "YES",
-                        "ethical_browsing": "ACTIVE"
-                    },
-                    "access_policies": {
-                        "domain_whitelist": "Comprehensive list of reputable sources",
-                        "robots_txt": "Always checked before accessing any URL",
-                        "crawl_delays": "Automatically respected per domain",
-                        "rate_limiting": "Built-in delays between requests",
-                        "user_agent_disclosure": "Transparent identification as AI research bot"
-                    },
-                    "categories_covered": {
-                        "news_sources": "Major international news outlets",
-                        "academic_research": "Peer-reviewed journals and repositories", 
-                        "government_data": "Official government and international organization sites",
-                        "technical_docs": "Programming languages and framework documentation",
-                        "educational": "Universities and online learning platforms",
-                        "health_medicine": "Medical institutions and health organizations",
-                        "climate_environment": "Environmental agencies and climate research",
-                        "finance_economics": "Financial institutions and economic data providers"
-                    }
-                }
-                
-                return {
-                    "status": "success",
-                    "ethics_report": report,
-                    "summary": "AGI demonstrates responsible web access with comprehensive compliance"
-                }
-            
+                return self._generate_web_ethics_report()
             elif action == "suggest_domain":
-                domain = kwargs.get("domain", "")
-                reason = kwargs.get("reason", "")
-                
-                if not domain or not reason:
-                    return {
-                        "status": "failure", 
-                        "description": "Both 'domain' and 'reason' parameters required"
-                    }
-                
-                # Log the suggestion for human review
-                suggestion_entry = {
-                    "domain": domain,
-                    "reason": reason,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "status": "pending_review"
-                }
-                
-                await self.write_file(
-                    file_path="domain_suggestions.json",
-                    content=json.dumps(suggestion_entry, indent=2)
+                return await self._handle_suggest_domain(
+                    kwargs.get("domain", ""), 
+                    kwargs.get("reason", "")
                 )
-                
-                return {
-                    "status": "success",
-                    "message": f"Domain suggestion logged: {domain}",
-                    "reason": reason,
-                    "note": "Suggestion requires human review before whitelist addition"
-                }
-            
             else:
                 return {
-                    "status": "failure",
+                    "status": self.STATUS_FAILURE,
                     "description": f"Unknown action: {action}. Available: list_whitelist, check_domain, test_robots, web_ethics_report, suggest_domain"
                 }
                 
         except Exception as e:
             return {
-                "status": "failure",
+                "status": self.STATUS_FAILURE,
                 "description": f"Web access management failed: {e}"
             }
 
@@ -2271,7 +2347,7 @@ Respond with ONLY the direct answer to the query.
             # Get system performance
             system_stats = {}
             try:
-                import psutil
+                import psutil  # type: ignore[import-untyped]
                 system_stats = {
                     "cpu_usage_percent": psutil.cpu_percent(interval=1),
                     "memory_usage_percent": psutil.virtual_memory().percent,
@@ -2279,7 +2355,13 @@ Respond with ONLY the direct answer to the query.
                     "process_count": len(psutil.pids())
                 }
             except ImportError:
-                system_stats = {"error": "psutil not available"}
+                system_stats = {
+                    "error": "psutil not available",
+                    "cpu_usage_percent": 0,
+                    "memory_usage_percent": 0,
+                    "disk_usage_percent": 0,
+                    "process_count": 0
+                }
             
             # Get web access compliance
             web_compliance = {}

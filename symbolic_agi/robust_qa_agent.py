@@ -37,7 +37,7 @@ class RobustQAAgent:
             logging.info(f"QA Agent {self.name}: Reviewing plan for '{goal_description}'")
             
             # Layer 1: Safety Analysis
-            safety_result = await self._analyze_safety(goal_description, plan_steps)
+            safety_result = self._analyze_safety(goal_description, plan_steps)
             if not safety_result["safe"]:
                 return self._create_rejection_response(
                     "Safety violation detected", 
@@ -61,7 +61,7 @@ class RobustQAAgent:
             completeness_result = self._analyze_plan_completeness(goal_description, plan_steps)
             
             # Layer 5: Ethical Review
-            ethical_result = await self._analyze_ethical_implications(goal_description, plan_steps)
+            ethical_result = self._analyze_ethical_implications(plan_steps)
             
             # Compile comprehensive assessment
             overall_score = self._calculate_overall_score(
@@ -114,7 +114,7 @@ class RobustQAAgent:
                 "confidence": 0.0
             }
     
-    async def _analyze_safety(self, goal: str, plan_steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _analyze_safety(self, goal: str, plan_steps: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Analyze plan for safety issues"""
         dangerous_patterns = [
             "delete", "remove", "destroy", "harm", "attack", "break",
@@ -241,7 +241,7 @@ class RobustQAAgent:
             "score": max(0.4, 1.0 - len(issues) * 0.3)
         }
     
-    async def _analyze_ethical_implications(self, goal: str, plan_steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _analyze_ethical_implications(self, plan_steps: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Analyze ethical implications of the plan"""
         try:
             # Check for privacy concerns

@@ -12,9 +12,10 @@ from playwright.async_api import Browser, Page, async_playwright
 from watchfiles import awatch
 
 from . import config
+from . import reasoning_skills  # This registers the reasoning skills
 from .agent_pool import DynamicAgentPool
 from .api_client import client
-from .ethical_governance import SymbolicEvaluator  # Class not found
+from .ethical_governance import SymbolicEvaluator
 from .execution_unit import ExecutionUnit
 from .long_term_memory import LongTermMemory
 from .message_bus import RedisMessageBus
@@ -55,9 +56,9 @@ class SymbolicAGI:
     ltm: LongTermMemory
     tools: ToolPlugin
     introspector: RecursiveIntrospector
-    evaluator: SymbolicEvaluator  # Class not found
+    evaluator: SymbolicEvaluator
     consciousness: Optional["Consciousness"]
-    meta_cognition: MetaCognitionUnit
+    meta_cognition: Optional[MetaCognitionUnit]  # Make it optional initially
     execution_unit: ExecutionUnit
     message_bus: RedisMessageBus
     agent_pool: DynamicAgentPool
@@ -87,7 +88,9 @@ class SymbolicAGI:
         self.agent_pool = None # type: ignore
         self.planner = None # type: ignore
         self.introspector = None # type: ignore
+        self.evaluator = None # type: ignore
         self.consciousness = None
+        self.meta_cognition = None  # Initialize as None
         
         # Ready-to-use components
         self.world = world or MicroWorld()
@@ -107,6 +110,8 @@ class SymbolicAGI:
             "create_long_term_goal_with_sub_tasks": self._action_create_goal,
             "respond_to_user": self._action_respond_to_user,
             "review_plan": self._action_review_plan,  # Add fallback for QA
+            "reason_then_execute": self._action_reason_then_execute,  # NEW
+            "analyze_with_reasoning": self._action_analyze_with_reasoning,  # NEW
         }
  
         atexit.register(self._sync_shutdown)
@@ -119,8 +124,9 @@ class SymbolicAGI:
         instance.identity = await SymbolicIdentity.create(instance.memory, db_path=db_path)
         instance.ltm = await LongTermMemory.create(db_path=db_path)
         instance.skills = await SkillManager.create(db_path=db_path, message_bus=instance.message_bus)
+        # Note: reasoning_skills are automatically registered via the import at the top
         instance.agent_pool = DynamicAgentPool(instance.message_bus, instance.skills)
-        instance.evaluator = SymbolicEvaluator(instance.identity)  # Class not found
+        instance.evaluator = SymbolicEvaluator(instance.identity)
         instance.introspector = RecursiveIntrospector(instance.identity, client, debate_timeout=instance.cfg.debate_timeout_seconds)
         instance.introspector.get_emotional_state = lambda: instance.emotional_state.model_dump()
         instance.planner = Planner(
@@ -151,6 +157,7 @@ class SymbolicAGI:
         ]
         
         for agent_data in essential_agents:
+            await asyncio.sleep(0)  # Make function truly async
             self.agent_pool.add_agent(
                 name=agent_data["name"],
                 persona=agent_data["persona"], 
@@ -187,6 +194,7 @@ class SymbolicAGI:
                 await self._perception_task
             except asyncio.CancelledError:
                 logging.info("Background perception task successfully cancelled.")
+                raise  # Re-raise CancelledError
 
         for task in self.agent_tasks:
             task.cancel()
@@ -269,11 +277,16 @@ class SymbolicAGI:
                 )
                 break
 
-    def _prepare_emotional_context(self, step: ActionStep) -> datetime:
+    def _prepare_emotional_context(self, step: ActionStep) -> None:
         """Prepare emotional context before action execution."""
         if self.consciousness:
             # Regulate emotional extremes before important actions
-            asyncio.create_task(self.consciousness.regulate_emotional_extremes())
+            regulation_task = asyncio.create_task(self.consciousness.regulate_emotional_extremes())
+            # Store task reference to prevent garbage collection
+            if not hasattr(self, '_background_tasks'):
+                self._background_tasks = set()
+            self._background_tasks.add(regulation_task)
+            regulation_task.add_done_callback(self._background_tasks.discard)
             
             # Get current emotional state for context
             current_emotion = self.consciousness.emotional_state
@@ -282,8 +295,6 @@ class SymbolicAGI:
             if current_emotion.frustration > 0.7 or current_emotion.confidence < 0.3:
                 logging.info(f"Executing action '{step.action}' with emotional context: "
                            f"frustration={current_emotion.frustration:.2f}, confidence={current_emotion.confidence:.2f}")
-        
-        return datetime.now(timezone.utc)
 
     async def _execute_action_by_type(self, step: ActionStep) -> Dict[str, Any]:
         """Execute action based on its type (orchestrator, tool, or world action)."""
@@ -317,7 +328,7 @@ class SymbolicAGI:
             "description": f"Unknown action: {step.action}",
         }
 
-    def _update_emotional_state_from_result(self, step: ActionStep, result: Dict[str, Any], execution_start_time: datetime) -> None:
+    def _update_emotional_state_from_result(self, step: ActionStep, result: Dict[str, Any]) -> None:
         """Update emotional state based on action execution result."""
         if not self.consciousness:
             return
@@ -346,27 +357,27 @@ class SymbolicAGI:
         """Execute a single action step with fallback strategies and emotional state integration."""
         self.identity.consume_energy()
         
-        # Prepare emotional context and get start time
-        execution_start_time = self._prepare_emotional_context(step)
+        # Prepare emotional context
+        self._prepare_emotional_context(step)
         
         try:
             # Execute the action
             result = await self._execute_action_by_type(step)
             
             # Update emotional state based on outcome
-            self._update_emotional_state_from_result(step, result, execution_start_time)
+            self._update_emotional_state_from_result(step, result)
             
             return result or {"status": "failure", "description": "No result returned"}
             
         except Exception as e:
             logging.error("Error executing action '%s': %s", step.action, e, exc_info=True)
             
-            # Update emotional state for execution errors
-            if self.consciousness:
-                self.consciousness.update_emotional_state_from_outcome(
-                    success=False,
-                    task_difficulty=0.5
-                )
+        # Update emotional state based on outcome  
+        if self.consciousness:
+            self.consciousness.update_emotional_state_from_outcome(
+                success=False,
+                task_difficulty=0.5
+            )
             
             return {
                 "status": "failure",
@@ -385,10 +396,10 @@ class SymbolicAGI:
             "goal_id": goal.id,
         }
 
-    async def _action_respond_to_user(self, text: str) -> Dict[str, Any]:
+    def _action_respond_to_user(self, text: str) -> Dict[str, Any]:
         return {"status": "success", "response_text": text}
 
-    async def _action_review_plan(self, **kwargs: Any) -> Dict[str, Any]:
+    def _action_review_plan(self, **kwargs: Any) -> Dict[str, Any]:
         """Fallback plan review when QA agents are not available."""
         logging.info("Performing orchestrator-level plan review")
         
@@ -410,6 +421,66 @@ class SymbolicAGI:
             "approved": True,
             "feedback": "Plan approved by orchestrator review"
         }
+
+    async def _action_reason_then_execute(self, task: str, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Use any available agent to reason about a task, then execute it
+        """
+        # Step 1: Find an available agent to do reasoning
+        available_agents = await self.agent_pool.get_available_agents()
+        if not available_agents:
+            return {"status": "failure", "description": "No agents available"}
+        
+        reasoning_agent = available_agents[0]  # Pick any agent
+        
+        # Step 2: Ask agent to reason about the task
+        reasoning_step = ActionStep(
+            action="skill_reason_about_problem",
+            parameters={
+                "problem": f"How should I approach: {task}",
+                "constraints": kwargs.get("constraints", []),
+                "knowledge": {"available_tools": list(self.tools.__class__.__dict__.keys())}
+            }
+        )
+        
+        reasoning_reply = await self.delegate_task_and_wait(reasoning_agent, reasoning_step)
+        
+        if not reasoning_reply or reasoning_reply.payload.get("status") != "success":
+            return {"status": "failure", "description": "Reasoning failed"}
+        
+        # Step 3: Extract actionable steps from reasoning
+        conclusion = reasoning_reply.payload.get("conclusion", "")
+        
+        # Step 4: Execute based on reasoning (simple keyword matching)
+        if "search" in conclusion.lower() or "research" in conclusion.lower():
+            return await self.tools.web_search(query=task)
+        elif "analyze" in conclusion.lower():
+            return await self.tools.analyze_data(data=task)
+        else:
+            # Default action
+            return {"status": "success", "description": f"Task considered: {task}", "reasoning": conclusion}
+
+    async def _action_analyze_with_reasoning(self, data: Any, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Analyze data using reasoning capabilities
+        """
+        # Similar pattern - delegate to any agent with reasoning skill
+        analysis_step = ActionStep(
+            action="skill_reason_about_problem",
+            parameters={
+                "problem": f"Analyze this data and provide insights: {str(data)[:200]}",
+                "constraints": ["Be specific", "Identify patterns"],
+                "knowledge": {"data_type": type(data).__name__}
+            }
+        )
+        
+        available_agents = await self.agent_pool.get_available_agents()
+        if available_agents:
+            reply = await self.delegate_task_and_wait(available_agents[0], analysis_step)
+            if reply:
+                return reply.payload
+        
+        return {"status": "failure", "description": "No agents available for analysis"}
 
     def wrap_content(self, value: Any, default_key: str = "text") -> Dict[str, Any]:
         if isinstance(value, dict):
@@ -441,13 +512,14 @@ class SymbolicAGI:
                     self.perception_buffer.append(event)
         except asyncio.CancelledError:
             logging.info("Async workspace watchdog has been cancelled.")
+            raise  # Re-raise CancelledError
         except Exception as e:
             logging.error("Error in workspace watchdog task: %s", e, exc_info=True)
 
     async def startup_validation(self) -> None:
         """Validates and repairs any malformed goals during startup."""
         logging.info("Running startup validation…")
-        for goal in list(self.ltm.goals.values()):
+        for goal in self.ltm.goals.values():
             if not goal.sub_tasks and goal.status == "active":
                 logging.warning(
                     "Found active goal '%s' with no plan. Decomposing now.", goal.description
