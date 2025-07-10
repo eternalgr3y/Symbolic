@@ -2,29 +2,34 @@
 
 import json
 import logging
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 from pydantic import TypeAdapter, ValidationError
 
-from .agent_pool import DynamicAgentPool
-from .recursive_introspector import RecursiveIntrospector
+# Import only schema types directly
 from .schemas import ActionStep, GoalMode, PlannerOutput
-from .skill_manager import SkillManager
-from .tool_plugin import ToolPlugin
+
+# Use TYPE_CHECKING to break circular imports at runtime
+if TYPE_CHECKING:
+    from .agent_pool import DynamicAgentPool
+    from .recursive_introspector import RecursiveIntrospector
+    from .skill_manager import SkillManager
+    from .tool_plugin import ToolPlugin
 
 
 class Planner:
     """
     A dedicated class for creating and repairing plans for the AGI.
-    It uses an introspector to reason about goals and available capabilities.
+    Uses an introspector to reason about goals and available capabilities.
+    Breaks circular imports by using TYPE_CHECKING for component dependencies.
     """
 
     def __init__(
         self,
-        introspector: RecursiveIntrospector,
-        skill_manager: SkillManager,
-        agent_pool: DynamicAgentPool,
-        tool_plugin: ToolPlugin,
+        introspector: "RecursiveIntrospector",
+        skill_manager: "SkillManager",
+        agent_pool: "DynamicAgentPool",
+        tool_plugin: "ToolPlugin",
     ):
         self.introspector = introspector
         self.skills = skill_manager
@@ -75,9 +80,11 @@ class Planner:
         mode: GoalMode = "code",
         failure_context: dict[str, Any] | None = None,
         refinement_feedback: dict[str, Any] | None = None,
+        emotional_context: dict[str, Any] | None = None,
     ) -> PlannerOutput:
         """
         Uses an LLM to generate or refine a plan, then validates and repairs it.
+        Now includes emotional context for better planning decisions.
         """
         all_actions = self.agent_pool.get_all_action_definitions()
         available_capabilities_json = json.dumps(all_actions, indent=2)
@@ -86,222 +93,178 @@ class Planner:
             '{"thought": "...", "plan": [{"action": "...", "parameters": {}, '
             '"assigned_persona": "..."}]}'
         )
-        master_prompt: str
 
-        data_flow_instructions = """
-# WORKSPACE & DATA FLOW
-- The `orchestrator` maintains a temporary `workspace` for each goal.
-- When a tool is executed, its return value is added to the workspace. For example,
-  `get_skill_details` returns `{"skill_details": {...}}`. This entire dictionary
-  is added to the workspace.
-- To use data from a previous step, you MUST use placeholders in the format
-  `{key}` or `{key.subkey}`.
-- **Example**:
-  - Step 1: `get_skill_details` -> returns `{"skill_details": {"id": "123", "name": "X"}}`
-  - Step 2: The workspace now contains `{"skill_details": {"id": "123", "name": "X"}}`.
-  - Step 3: To use the id, the parameters should be `{"skill_id": "{skill_details.id}"}`.
-- **DO NOT** use placeholders like `<<...>>` or `{{...}}`. Only use single curly braces: `{key}`.
-"""
+        base_context = f"""
+You are a plan generator for an autonomous AGI system. Your job is to break down high-level goals into specific, executable action steps.
 
-        if refinement_feedback:
-            logging.critical(
-                "REFINING plan for goal: '%s' based on QA feedback.", goal_description
-            )
-            previous_plan_str = json.dumps(
-                refinement_feedback.get("plan_to_review", []), indent=2
-            )
-            feedback_str = refinement_feedback.get("feedback", "No feedback provided.")
+GOAL MODE: {mode}
 
-            master_prompt = f"""
-You are an expert project manager AGI. A plan you created was reviewed by your QA
-team and rejected. Your task is to incorporate their feedback to create a better plan.
-
---- ORIGINAL GOAL ---
-{goal_description}
-
---- PREVIOUS (REJECTED) PLAN ---
-{previous_plan_str}
-
---- QA FEEDBACK (You MUST address this) ---
-"{feedback_str}"
-
---- AVAILABLE CAPABILITIES (JSON) ---
+AVAILABLE CAPABILITIES:
 {available_capabilities_json}
-{data_flow_instructions}
---- INSTRUCTIONS ---
-1.  **Analyze the Feedback**: Understand why the previous plan was rejected.
-2.  **Formulate a New Strategy**: Create a new, complete plan from scratch that
-    directly addresses the QA feedback and follows all data flow rules.
-3.  **Respond**: Decompose the corrected approach into a JSON object with your
-    "thought" process and the new "plan". Each step in the plan MUST have an
-    "action", "parameters", and "assigned_persona". Respond ONLY with the raw
-    JSON object: {response_format}
-"""
-        elif failure_context:
-            logging.critical("REPLANNING for goal: '%s'", goal_description)
-            master_prompt = f"""
-You are an expert troubleshooter AGI. A previous attempt to achieve a goal
-failed. Your task is to perform a root-cause analysis and create a new, corrected plan.
 
---- ORIGINAL GOAL ---
-{goal_description}
+RESPONSE FORMAT: {response_format}
 
---- FAILED PLAN CONTEXT ---
-{json.dumps(failure_context, indent=2)}
+GUIDELINES:
+1. Each step must specify a valid "action" from the available capabilities
+2. Each step must have an "assigned_persona" matching the action's required persona
+3. Parameters should be specific and actionable
+4. Think step-by-step in your "thought" field
+5. Keep plans focused and achievable"""
 
---- AVAILABLE CAPABILITIES (JSON) ---
-{available_capabilities_json}
-{data_flow_instructions}
---- INSTRUCTIONS ---
-1.  **Analyze the Trace**: Review the `execution_history` and `error_message`.
-2.  **Identify Root Cause**: The most common error is failing to pass data
-    correctly between steps. You must use the `{{key.subkey}}` syntax to
-    reference data from the workspace.
-3.  **Formulate a New Strategy**: Create a new, complete plan from scratch that
-    fixes the root cause.
-4.  **Respond**: Decompose the corrected approach into a JSON object with your
-    "thought" process and the new "plan". Each step MUST have an "action",
-    "parameters", and "assigned_persona". Respond ONLY with the raw JSON
-    object: {response_format}
-"""
+        # Add emotional context to planning if available
+        if emotional_context:
+            frustration = emotional_context.get("frustration", 0.0)
+            confidence = emotional_context.get("confidence", 0.5)
+            anxiety = emotional_context.get("anxiety", 0.0)
+            
+            emotional_guidance = f"""
+
+EMOTIONAL CONTEXT:
+- Current frustration level: {frustration:.2f}/1.0
+- Current confidence level: {confidence:.2f}/1.0 
+- Current anxiety level: {anxiety:.2f}/1.0
+
+EMOTIONAL PLANNING GUIDELINES:
+- If frustration is high (>0.7): Create simpler, more direct plans with fewer steps
+- If confidence is low (<0.4): Include validation/verification steps and safer approaches
+- If anxiety is high (>0.7): Avoid risky actions and include contingency planning
+- Adjust complexity based on emotional state - simpler plans when stressed"""
+            
+            base_context += emotional_guidance
+
+        if failure_context:
+            context = base_context + f"\n\nPREVIOUS FAILURE CONTEXT:\n{json.dumps(failure_context, indent=2)}"
+        elif refinement_feedback:
+            context = base_context + f"\n\nREFINEMENT FEEDBACK:\n{json.dumps(refinement_feedback, indent=2)}"
         else:
-            logging.info("Decomposing goal: '%s'", goal_description)
-            docs_mode_instruction = (
-                'You are in "docs" mode. You MUST NOT use the "write_code" '
-                'or "execute_python_code" actions.'
-            )
-            master_prompt = f"""
-You are a master project manager AGI. Your task is to decompose a high-level
-goal into a series of concrete, logical steps.
+            context = base_context
 
-# GOAL MODE: {mode.upper()}
-{docs_mode_instruction if mode == "docs" else ""}
-
-# AVAILABLE CAPABILITIES (JSON format)
-{available_capabilities_json}
-{data_flow_instructions}
-# TOOL & SKILL ASSIGNMENT RULES
-- Use the `assigned_persona` from the JSON capability definition.
-- Learned skills are high-level actions that are expanded and executed by the "orchestrator".
-
-# IMPORTANT LOGIC PATTERNS
-- To answer questions about a file, you MUST first `read_file` (orchestrator) and
-  then use `analyze_data` (orchestrator) on the `content` key.
-- To modify your own source code, you MUST use the two-step
-  `propose_code_modification` (orchestrator) -> `apply_code_modification`
-  (orchestrator) process.
-- **You MUST consider your 'CURRENT INTERNAL STATE' (emotions, energy). If
-  frustration is high or energy is low, create simpler, lower-risk plans. If
-  necessary, plan to ask the user for help using `respond_to_user`.**
-
-Goal: "{goal_description}"
-
---- INSTRUCTIONS ---
-1.  **Think**: First, write a step-by-step "thought" process for how you will
-    achieve the goal.
-2.  **Plan**: Based on your thought process, create a JSON array of action steps.
-    Each step MUST include an "action", "parameters", and "assigned_persona"
-    according to the assignment rules above. Use the `{{key}}` syntax to pass
-    data between steps.
-3.  **Respond**: Format your entire response as a single JSON object: {response_format}
-"""
-        plan_str = ""
-        planner_output_dict: dict[str, Any] | None = None
-        for attempt in range(2):
-            try:
-                if attempt == 0:
-                    plan_str = await self.introspector.llm_reflect(master_prompt)
-                else:
-                    logging.warning(
-                        "Malformed JSON response detected. Attempting repair on: %s",
-                        plan_str[:200],
-                    )
-                    forceful_prompt = f"""
-The following text is NOT valid JSON.
---- BROKEN TEXT ---
-{plan_str}
----
-FIX THIS. Respond ONLY with the corrected, raw JSON object in the format {response_format}.
-"""
-                    plan_str = await self.introspector.llm_reflect(forceful_prompt)
-
-                if "```json" in plan_str:
-                    plan_str = plan_str.partition("```json")[2].partition("```")[0]
-
-                planner_output_dict = json.loads(plan_str)
-                break
-
-            except json.JSONDecodeError as e:
-                if attempt < 1:
-                    continue
-                else:
-                    logging.error(
-                        "Final repair attempt failed to produce valid JSON: %s. "
-                        "Response was: %s",
-                        e,
-                        plan_str,
-                    )
-                    return PlannerOutput(
-                        thought="Failed to generate a valid plan.", plan=[]
-                    )
-
-        if planner_output_dict is None:
-            return PlannerOutput(thought="Planner returned no output.", plan=[])
-
-        thought = planner_output_dict.get("thought", "No thought recorded.")
-        raw_plan_steps = cast("list[dict[str, Any]]", planner_output_dict.get("plan", []))
-
-        repaired_plan_steps = await self._validate_and_repair_plan(
-            raw_plan_steps, goal_description
-        )
-        if not repaired_plan_steps:
-            if refinement_feedback is None and failure_context is None:
-                return await self.decompose_goal_into_plan(
-                    goal_description,
-                    file_manifest,
-                    mode,
-                    refinement_feedback={
-                        "feedback": (
-                            "The generated plan contained invalid action/persona "
-                            "assignments. Please regenerate the plan adhering "
-                            "strictly to the available capabilities."
-                        )
-                    },
-                )
-            else:
-                logging.error(
-                    "Plan validation failed during refinement. Returning empty plan."
-                )
-                return PlannerOutput(
-                    thought="Plan validation failed during refinement.", plan=[]
-                )
+        prompt = f"{context}\n\nGOAL TO PLAN:\n{goal_description}\n\nFILE MANIFEST:\n{file_manifest}"
 
         try:
-            ActionStepListValidator = TypeAdapter(list[ActionStep])
-            validated_plan = ActionStepListValidator.validate_python(
-                repaired_plan_steps
+            response = await self.introspector.reason_with_context(
+                prompt=prompt,
+                context_type="planning",
+                max_tokens=2000
             )
-        except ValidationError as e:
-            logging.error(
-                "Failed to validate repaired plan structure: %s", e, exc_info=True
-            )
+
+            # Parse the JSON response
+            plan_data = json.loads(response)
+            thought = plan_data.get("thought", "")
+            plan_steps = plan_data.get("plan", [])
+
+            # Validate and repair the plan
+            validated_plan = await self._validate_and_repair_plan(plan_steps, goal_description)
+
+            if not validated_plan:
+                logging.error("[Planner] Failed to generate valid plan for goal: %s", goal_description)
+                return PlannerOutput(
+                    plan=[],
+                    thought="Failed to generate a valid plan.",
+                    confidence=0.0
+                )
+
+            # Convert to ActionStep objects
+            action_steps = []
+            adapter = TypeAdapter(ActionStep)
+            
+            for step_data in validated_plan:
+                try:
+                    action_step = adapter.validate_python(step_data)
+                    action_steps.append(action_step)
+                except ValidationError as e:
+                    logging.warning("[Planner] Invalid step data: %s. Error: %s", step_data, e)
+                    continue
+
+            confidence = min(1.0, len(action_steps) / max(1, len(plan_steps)))
+            
+            logging.info("[Planner] Generated plan with %d valid steps (confidence: %.2f)", 
+                        len(action_steps), confidence)
+
             return PlannerOutput(
-                thought=f"Failed to validate plan structure: {e}", plan=[]
+                plan=action_steps,
+                thought=thought,
+                confidence=confidence
             )
 
-        if failure_context is None and refinement_feedback is None:
-            logging.info(
-                "Plan generated with %d steps. Adding QA review step.",
-                len(validated_plan),
+        except json.JSONDecodeError as e:
+            logging.error("[Planner] Failed to parse plan JSON: %s", e)
+            return PlannerOutput(
+                plan=[],
+                thought="Failed to parse planning response as JSON.",
+                confidence=0.0
             )
-            review_step = ActionStep(
-                action="review_plan",
-                parameters={
-                    "original_goal": goal_description,
-                    "plan_to_review": [step.model_dump() for step in validated_plan],
-                },
-                assigned_persona="qa",
+        except Exception as e:
+            logging.error("[Planner] Unexpected error during planning: %s", e)
+            return PlannerOutput(
+                plan=[],
+                thought=f"Planning failed due to unexpected error: {str(e)}",
+                confidence=0.0
             )
-            return PlannerOutput(thought=thought, plan=[review_step] + validated_plan)
 
-        return PlannerOutput(thought=thought, plan=validated_plan)
+    async def repair_plan(
+        self,
+        goal_description: str,
+        current_plan: list[ActionStep],
+        failure_reason: str,
+        workspace_context: dict[str, Any] | None = None
+    ) -> PlannerOutput:
+        """
+        Repairs a failed plan by analyzing the failure and generating a new approach.
+        """
+        failure_context = {
+            "goal": goal_description,
+            "failed_plan": [step.model_dump() for step in current_plan],
+            "failure_reason": failure_reason,
+            "workspace_state": workspace_context or {}
+        }
+
+        logging.info("[Planner] Repairing plan for goal: %s (reason: %s)", 
+                    goal_description, failure_reason)
+
+        return await self.decompose_goal_into_plan(
+            goal_description=goal_description,
+            file_manifest="# Repair context\nRepairing failed plan...",
+            mode="code",
+            failure_context=failure_context
+        )
+
+    async def refine_plan(
+        self,
+        goal_description: str,
+        current_plan: list[ActionStep],
+        feedback: dict[str, Any]
+    ) -> PlannerOutput:
+        """
+        Refines an existing plan based on feedback or new requirements.
+        """
+        refinement_feedback = {
+            "goal": goal_description,
+            "current_plan": [step.model_dump() for step in current_plan],
+            "feedback": feedback
+        }
+
+        logging.info("[Planner] Refining plan for goal: %s", goal_description)
+
+        return await self.decompose_goal_into_plan(
+            goal_description=goal_description,
+            file_manifest="# Refinement context\nRefining existing plan...",
+            mode="code",
+            refinement_feedback=refinement_feedback
+        )
+
+    def get_planning_capabilities(self) -> dict[str, Any]:
+        """
+        Returns information about the planner's current capabilities.
+        """
+        all_actions = self.agent_pool.get_all_action_definitions()
+        
+        return {
+            "available_actions": len(all_actions),
+            "supported_personas": list(set(
+                action.get("persona", "unknown") 
+                for action in all_actions.values()
+            )),
+            "skills_available": len(self.skills.learned_skills),
+            "innate_actions": len(self.skills.innate_actions)
+        }

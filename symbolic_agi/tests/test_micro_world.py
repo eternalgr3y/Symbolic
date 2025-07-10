@@ -93,17 +93,44 @@ async def test_action_open_chest_with_key(world: MicroWorld) -> None:
     assert chest is not None and chest["state"] == "locked"
 
     # Move to room2 (key)
-    await world.perform_action("move", agent_name=agent_name, new_location="room2")
+    move_result = await world.perform_action("move", agent_name=agent_name, new_location="room2")
+    print(f"Move to room2 result: {move_result}")
+    
+    # Check agent location after first move
+    agent = world.get_agent(agent_name)
+    print(f"Agent location after move to room2: {agent['location']}")
+    
     # Pick up the key
-    await world.perform_action("pickup", agent_name=agent_name, object_name="Key")
-    # Move back to the chest
-    await world.perform_action("move", agent_name=agent_name, new_location="room1")
+    pickup_result = await world.perform_action("pickup", agent_name=agent_name, object_name="Key")
+    print(f"Pickup result: {pickup_result}")
+    
+    # Move back to the chest (via hallway)
+    move_to_hallway_result = await world.perform_action("move", agent_name=agent_name, new_location="hallway")
+    print(f"Move to hallway result: {move_to_hallway_result}")
+    
+    move_back_result = await world.perform_action("move", agent_name=agent_name, new_location="room1")
+    print(f"Move back to room1 result: {move_back_result}")
+    
+    # Check agent location after second move
+    agent = world.get_agent(agent_name)
+    print(f"Agent location after move to room1: {agent['location']}")
 
     agent = world.get_agent(agent_name)
     assert agent is not None and "Key" in agent["inventory"]
 
+    # Debug: Check chest state before opening
+    chest = world.get_object("Chest")
+    print(f"Chest state before open: {chest}")
+    print(f"Chest type: {chest.get('type')}")
+
     # Open the chest
     open_result = await world.perform_action("open", agent_name=agent_name, object_name="Chest")
+    
+    print(f"Open result: {open_result}")
+    
+    # Check chest state after
+    chest = world.get_object("Chest")
+    print(f"Chest state after open: {chest}")
 
     assert open_result["status"] == "success"
     assert "Unlocked the Chest" in open_result["description"]

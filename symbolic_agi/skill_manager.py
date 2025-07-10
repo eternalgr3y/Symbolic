@@ -1,5 +1,5 @@
 # symbolic_agi/skill_manager.py
-
+from contextlib import asynccontextmanager  # ADD THIS IMPORT AT TOP
 import asyncio
 import json
 import logging
@@ -96,6 +96,72 @@ class SkillManager:
             )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_name_version ON skills (name, version);")
             await db.commit()
+
+# Add this context manager at the class level
+
+    @asynccontextmanager
+    async def _db_connection(self):
+        """Context manager for database connections with proper cleanup."""
+        async with self._save_lock:
+            conn = await aiosqlite.connect(self.db_path)
+            try:
+                yield conn
+            finally:
+                await conn.close()
+
+    # Fix the direct connection in get_skill method (around line 117)
+    async def get_skill(self, skill_name: str) -> Optional[SkillModel]:
+        """Retrieves a skill by name."""
+        async with self._db_connection() as db:
+            async with db.execute(
+                "SELECT * FROM skills WHERE name = ? AND is_deleted = 0 ORDER BY version DESC LIMIT 1",
+                (skill_name,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return SkillModel(
+                        name=row[1],
+                        description=row[2],
+                        implementation=row[3],
+                        version=row[4],
+                        created_at=row[5],
+                        updated_at=row[6],
+                        tags=json.loads(row[7]) if row[7] else [],
+                        usage_count=row[8],
+                        success_count=row[9],
+                        failure_count=row[10],
+                        is_deleted=bool(row[11])
+                    )
+        return None
+
+    # Fix the connection in _prune_old_skill_versions (around line 178)
+    async def _prune_old_skill_versions(self) -> None:
+        """Prunes old skill versions beyond the retention limit."""
+        async with self._db_connection() as db:
+            # Get skills with too many versions
+            async with db.execute("""
+                SELECT name, COUNT(*) as version_count 
+                FROM skills 
+                WHERE is_deleted = 0 
+                GROUP BY name 
+                HAVING version_count > ?
+            """, (self.max_versions_per_skill,)) as cursor:
+                skills_to_prune = await cursor.fetchall()
+        
+        # Prune excess versions for each skill
+        for skill_name, version_count in skills_to_prune:
+            excess_count = version_count - self.max_versions_per_skill
+            await db.execute("""
+                UPDATE skills SET is_deleted = 1 
+                WHERE name = ? AND id IN (
+                    SELECT id FROM skills 
+                    WHERE name = ? 
+                    ORDER BY version ASC 
+                    LIMIT ?
+                )
+            """, (skill_name, skill_name, excess_count))
+        
+        await db.commit()
 
     async def _load_skills(self) -> None:
         """Loads skills from the database."""

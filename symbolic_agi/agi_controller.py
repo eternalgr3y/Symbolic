@@ -269,41 +269,105 @@ class SymbolicAGI:
                 )
                 break
 
+    def _prepare_emotional_context(self, step: ActionStep) -> datetime:
+        """Prepare emotional context before action execution."""
+        if self.consciousness:
+            # Regulate emotional extremes before important actions
+            asyncio.create_task(self.consciousness.regulate_emotional_extremes())
+            
+            # Get current emotional state for context
+            current_emotion = self.consciousness.emotional_state
+            
+            # Log emotional context for debugging
+            if current_emotion.frustration > 0.7 or current_emotion.confidence < 0.3:
+                logging.info(f"Executing action '{step.action}' with emotional context: "
+                           f"frustration={current_emotion.frustration:.2f}, confidence={current_emotion.confidence:.2f}")
+        
+        return datetime.now(timezone.utc)
+
+    async def _execute_action_by_type(self, step: ActionStep) -> Dict[str, Any]:
+        """Execute action based on its type (orchestrator, tool, or world action)."""
+        # Try orchestrator actions first
+        if step.action in self.orchestrator_actions:
+            action_func = self.orchestrator_actions[step.action]
+            return cast(Dict[str, Any], await action_func(**step.parameters))
+
+        # Try tool methods
+        tool_method = getattr(self.tools, step.action, None)
+        if tool_method and asyncio.iscoroutinefunction(tool_method):
+            # Add workspace context for tools
+            active_goal = await self.ltm.get_active_goal()
+            if active_goal:
+                workspace = self.workspaces.setdefault(active_goal.id, {})
+                step.parameters["workspace"] = workspace
+            result = await tool_method(**step.parameters)
+            return cast(Dict[str, Any], result)
+
+        # Try world actions
+        world_action = getattr(self.world, f"_action_{step.action}", None)
+        if callable(world_action):
+            if asyncio.iscoroutinefunction(world_action):
+                world_result = await world_action(**step.parameters)
+            else:
+                world_result = world_action(**step.parameters)
+            return cast(Dict[str, Any], world_result)
+
+        return {
+            "status": "failure", 
+            "description": f"Unknown action: {step.action}",
+        }
+
+    def _update_emotional_state_from_result(self, step: ActionStep, result: Dict[str, Any], execution_start_time: datetime) -> None:
+        """Update emotional state based on action execution result."""
+        if not self.consciousness:
+            return
+            
+        success = result.get("status") == "success"
+        
+        # Calculate task complexity based on step properties
+        task_complexity = 0.5  # Default
+        if hasattr(step, 'risk') and step.risk == 'high':
+            task_complexity = 0.8
+        elif hasattr(step, 'risk') and step.risk == 'low':
+            task_complexity = 0.3
+        
+        self.consciousness.update_emotional_state_from_outcome(
+            success=success,
+            task_difficulty=task_complexity
+        )
+        
+        # Log emotional state changes
+        updated_emotion = self.consciousness.emotional_state
+        logging.debug(f"Action '{step.action}' completed. Emotional update: "
+                    f"confidence={updated_emotion.confidence:.2f}, "
+                    f"frustration={updated_emotion.frustration:.2f}")
+
     async def execute_single_action(self, step: ActionStep) -> Dict[str, Any]:
-        """Execute a single action step with fallback strategies."""
+        """Execute a single action step with fallback strategies and emotional state integration."""
         self.identity.consume_energy()
+        
+        # Prepare emotional context and get start time
+        execution_start_time = self._prepare_emotional_context(step)
+        
         try:
-            # Try orchestrator actions first
-            if step.action in self.orchestrator_actions:
-                action_func = self.orchestrator_actions[step.action]
-                return cast(Dict[str, Any], await action_func(**step.parameters))
-
-            # Try tool methods
-            tool_method = getattr(self.tools, step.action, None)
-            if tool_method and asyncio.iscoroutinefunction(tool_method):
-                # Add workspace context for tools
-                active_goal = await self.ltm.get_active_goal()
-                if active_goal:
-                    workspace = self.workspaces.setdefault(active_goal.id, {})
-                    step.parameters["workspace"] = workspace
-                result = await tool_method(**step.parameters)
-                return cast(Dict[str, Any], result)
-
-            # Try world actions
-            world_action = getattr(self.world, f"_action_{step.action}", None)
-            if callable(world_action):
-                if asyncio.iscoroutinefunction(world_action):
-                    world_result = await world_action(**step.parameters)
-                else:
-                    world_result = world_action(**step.parameters)
-                return cast(Dict[str, Any], world_result)
-
-            return {
-                "status": "failure",
-                "description": f"Unknown action: {step.action}",
-            }
+            # Execute the action
+            result = await self._execute_action_by_type(step)
+            
+            # Update emotional state based on outcome
+            self._update_emotional_state_from_result(step, result, execution_start_time)
+            
+            return result or {"status": "failure", "description": "No result returned"}
+            
         except Exception as e:
             logging.error("Error executing action '%s': %s", step.action, e, exc_info=True)
+            
+            # Update emotional state for execution errors
+            if self.consciousness:
+                self.consciousness.update_emotional_state_from_outcome(
+                    success=False,
+                    task_difficulty=0.5
+                )
+            
             return {
                 "status": "failure",
                 "description": f"Execution error: {e}",

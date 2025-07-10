@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 import os
+import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple  # UPDATE THIS
 
 import aiosqlite
 import faiss
@@ -15,6 +16,11 @@ from openai import APIConnectionError, AsyncOpenAI, OpenAIError, RateLimitError
 from . import config, metrics
 from .api_client import monitored_chat_completion, monitored_embedding_creation
 from .schemas import MemoryEntryModel, MemoryType
+
+
+class EmbeddingError(Exception):
+    """Raised when embedding generation fails."""
+    pass
 
 
 class SymbolicMemory:
@@ -32,6 +38,11 @@ class SymbolicMemory:
         self._embedding_buffer: List[MemoryEntryModel] = []
         self._embedding_batch_size: int = 10
         self._flush_task = asyncio.create_task(self._embed_daemon())
+        
+        # ADD THESE NEW ATTRIBUTES
+        self.embedding_cache: Dict[str, np.ndarray] = {}
+        self.cache_max_size = 1000
+        self.pending_memories: List[MemoryEntryModel] = []
 
     @classmethod
     async def create(cls, client: AsyncOpenAI, db_path: str = config.DB_PATH) -> "SymbolicMemory":
@@ -149,25 +160,60 @@ class SymbolicMemory:
         )
 
     async def embed_async(self: "SymbolicMemory", texts: List[str]) -> np.ndarray:
+        """Gets embeddings with caching and validation."""
         if not texts:
             return np.array([])
-        try:
-            resp = await monitored_embedding_creation(
-                model=config.EMBEDDING_MODEL, input=texts
-            )
-            return np.array([e.embedding for e in resp.data], dtype=np.float32)
-        except (RateLimitError, APIConnectionError, OpenAIError) as e:
-            logging.error(
-                "OpenAI API error during embedding: %s. Returning zero vectors.", e
-            )
-            return np.zeros((len(texts), config.EMBEDDING_DIM), dtype=np.float32)
-        except Exception as e:
-            logging.error(
-                "Unexpected error during embedding: %s. Returning zero vectors.",
-                e,
-                exc_info=True,
-            )
-            return np.zeros((len(texts), config.EMBEDDING_DIM), dtype=np.float32)
+        
+        embeddings = []
+        uncached_texts = []
+        uncached_indices = []
+        
+        # Check cache first
+        for i, text in enumerate(texts):
+            cache_key = hashlib.md5(text.encode()).hexdigest()
+            if cache_key in self.embedding_cache:
+                embeddings.append((i, self.embedding_cache[cache_key].copy()))
+            else:
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+        
+        # Get uncached embeddings from API
+        if uncached_texts:
+            try:
+                resp = await monitored_embedding_creation(
+                    model=config.EMBEDDING_MODEL, input=uncached_texts
+                )
+                
+                for idx, embedding_data in enumerate(resp.data):
+                    embedding = np.array(embedding_data.embedding, dtype=np.float32)
+                    
+                    # Validate embedding
+                    if embedding.shape[0] == config.EMBEDDING_DIM and not np.all(embedding == 0):
+                        text_idx = uncached_indices[idx]
+                        embeddings.append((text_idx, embedding))
+                        
+                        # Update cache
+                        cache_key = hashlib.md5(uncached_texts[idx].encode()).hexdigest()
+                        self._update_cache(cache_key, embedding)
+                    else:
+                        raise ValueError(f"Invalid embedding shape or zero vector")
+                        
+            except Exception as e:
+                logging.error(f"OpenAI API error during embedding: {e}")
+                raise EmbeddingError(f"Failed to generate embeddings: {e}")
+        
+        # Sort by original index and return
+        embeddings.sort(key=lambda x: x[0])
+        return np.array([emb for _, emb in embeddings], dtype=np.float32)
+
+    def _update_cache(self, key: str, embedding: np.ndarray) -> None:
+        """Updates embedding cache with size limit."""
+        if len(self.embedding_cache) >= self.cache_max_size:
+            # Remove oldest entry (simple FIFO)
+            oldest_key = next(iter(self.embedding_cache))
+            del self.embedding_cache[oldest_key]
+        
+        self.embedding_cache[key] = embedding.copy()
 
     async def add_memory(self: "SymbolicMemory", entry: MemoryEntryModel) -> None:
         """Adds a new memory entry to the embedding buffer."""
@@ -195,8 +241,16 @@ class SymbolicMemory:
             self._embedding_buffer.clear()
 
             texts_to_embed = [json.dumps(entry.content) for entry in entries_to_process]
-            embeddings = await self.embed_async(texts_to_embed)
-
+            
+            # WRAP IN TRY-EXCEPT
+            try:
+                embeddings = await self.embed_async(texts_to_embed)
+            except EmbeddingError as e:
+                logging.error(f"Failed to generate embeddings: {e}")
+                # Move to pending queue for retry
+                self.pending_memories.extend(entries_to_process)
+                return
+            
             if embeddings.shape[0] != len(entries_to_process):
                 logging.error(
                     "Embedding batch failed: Mismatch between entries and embeddings. "
@@ -389,3 +443,24 @@ Respond with ONLY the summary text.
             key=lambda m: (m.importance, m.timestamp), reverse=True
         )
         return relevant_memories[:limit]
+
+    async def cleanup(self) -> None:
+        """Cleanup resources gracefully."""
+        logging.info("Starting SymbolicMemory cleanup...")
+        
+        # Cancel flush task
+        if hasattr(self, '_flush_task') and self._flush_task:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Flush any remaining memories
+        if self._embedding_buffer:
+            await self._process_embedding_buffer()
+        
+        # Save FAISS index
+        await self.save()
+        
+        logging.info("SymbolicMemory cleanup complete")

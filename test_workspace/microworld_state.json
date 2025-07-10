@@ -2,7 +2,7 @@
     "agents": [
         {
             "name": "SymbolicAGI",
-            "location": "room2",
+            "location": "room1",
             "inventory": [
                 "Key"
             ]
@@ -31,7 +31,8 @@
         {
             "name": "Chest",
             "location": "room1",
-            "state": "locked",
+            "state": "unlocked",
+            "type": "chest",
             "description": "A heavy wooden chest with a lock."
         },
         {
@@ -93,6 +94,39 @@
             "result": {
                 "status": "success",
                 "description": "SymbolicAGI picked up Key."
+            }
+        },
+        {
+            "action": "move",
+            "params": {
+                "agent_name": "SymbolicAGI",
+                "new_location": "hallway"
+            },
+            "result": {
+                "status": "success",
+                "description": "SymbolicAGI moves to hallway."
+            }
+        },
+        {
+            "action": "move",
+            "params": {
+                "agent_name": "SymbolicAGI",
+                "new_location": "room1"
+            },
+            "result": {
+                "status": "success",
+                "description": "SymbolicAGI moves to room1."
+            }
+        },
+        {
+            "action": "open",
+            "params": {
+                "agent_name": "SymbolicAGI",
+                "object_name": "Chest"
+            },
+            "result": {
+                "status": "success",
+                "description": "Unlocked the Chest with the Key!"
             }
         }
     ]

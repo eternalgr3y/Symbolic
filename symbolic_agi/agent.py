@@ -109,72 +109,58 @@ class Agent:
     @register_innate_action(
         "browser", "Analyzes a web page and decides the next interaction."
     )
-    async def skill_interact_with_page(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Analyzes the content of a web page and decides the next interaction.
-        """
-        objective = params.get("objective", "Explore the page.")
-        page_content = params.get("page_content", "Page is empty.")
-        prompt = prompts.INTERACT_WITH_PAGE_PROMPT.format(
-            objective=objective, page_content=page_content
-        )
-        try:
-            resp = await monitored_chat_completion(
-                role="agent_skill",
-                messages=[{"role": "system", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
-            if resp.choices and resp.choices[0].message.content:
-                action_data = json.loads(resp.choices[0].message.content)
-                return {"status": "success", "browser_action": action_data}
-            return {
-                "status": "failure",
-                "error": "No browser action returned from LLM.",
-            }
-        except Exception as e:
-            return {"status": "failure", "error": str(e)}
+# File: symbolic_agi/agent.py
+# Fix for skill_review_skill_efficiency method (around line 127)
 
-    @register_innate_action(
-        "qa",
-        "Reviews a learned skill's action sequence for potential improvements.",
-    )
-    async def skill_review_skill_efficiency(
-        self, params: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Reviews a learned skill's action sequence for potential improvements.
-        """
+    async def skill_review_skill_efficiency(self, skill_name: str) -> str:
+        """Reviews a skill's efficiency and provides optimization suggestions."""
         try:
-            skill_data = params.get("skill_to_review", {})
-            skill = SkillModel.model_validate(skill_data)
-            plan_str = json.dumps(
-                [step.model_dump() for step in skill.action_sequence], indent=2
-            )
-            prompt = prompts.REVIEW_SKILL_EFFICIENCY_PROMPT.format(
-                skill_name=skill.name,
-                skill_description=skill.description,
-                plan_str=plan_str,
-            )
-            resp = await monitored_chat_completion(
-                role="qa",
-                messages=[{"role": "system", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
-            if resp.choices and resp.choices[0].message.content:
-                review_data = json.loads(resp.choices[0].message.content)
-                return {
-                    "status": "success",
-                    "approved": review_data.get("approved", False),
-                    "feedback": review_data.get(
-                        "feedback", "QA review returned an incomplete response."
-                    ),
-                }
-            return {"status": "failure", "error": "No content returned from LLM."}
+            # Get skill details from skill manager
+            skill_details = await self.skill_manager.get_skill_details(skill_name)
+            
+            # FIX 1: Validate skill_details before processing
+            if not skill_details:
+                self.logger.warning(f"No skill details found for '{skill_name}'")
+                return f"Skill '{skill_name}' not found in skill manager."
+            
+            # FIX 2: Handle placeholder strings
+            if isinstance(skill_details, str) and skill_details == "<<retrieved_skill_details>>":
+                self.logger.error(f"Received placeholder instead of skill details for '{skill_name}'")
+                # Attempt to retrieve actual skill data
+                skill_model = await self.skill_manager.get_skill(skill_name)
+                if skill_model:
+                    skill_details = skill_model.model_dump()
+                else:
+                    return f"Unable to retrieve details for skill '{skill_name}'."
+            
+            # FIX 3: Ensure skill_details is a dictionary
+            if not isinstance(skill_details, dict):
+                self.logger.error(f"Invalid skill details type: {type(skill_details)}")
+                return f"Invalid skill data format for '{skill_name}'."
+            
+            # FIX 4: Safe model validation with error handling
+            try:
+                skill_model = SkillModel.model_validate(skill_details)
+            except ValidationError as e:
+                self.logger.error(f"Skill validation failed for '{skill_name}': {e}")
+                return f"Skill '{skill_name}' has invalid data structure: {e}"
+            
+            # Continue with the review process...
+            review_prompt = f"""
+            Review this skill for efficiency and optimization opportunities:
+            Name: {skill_model.name}
+            Description: {skill_model.description}
+            Implementation: {skill_model.implementation}
+            
+            Provide specific suggestions for improvement.
+            """
+            
+            response = await self._query_llm(review_prompt)
+            return response.strip()
+            
         except Exception as e:
-            logging.error(
-                "Error in skill_review_skill_efficiency: %s", e, exc_info=True
-            )
-            return {"status": "failure", "error": str(e)}
+            self.logger.error(f"Error reviewing skill '{skill_name}': {e}")
+            return f"Error reviewing skill: {str(e)}"
 
     @register_innate_action(
         "qa", "Reviews a plan for logical flaws or inefficiency."

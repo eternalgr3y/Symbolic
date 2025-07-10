@@ -10,13 +10,16 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, cast, Dict, List, Optional
 
 from . import config, metrics
-from .execution_metrics import ExecutionMetrics, PerformanceMonitor
-from .execution_strategies import HybridExecutionStrategy
-from .perception_processor import PerceptionProcessor
-from .schemas import ActionStep, ExecutionStepRecord, GoalModel, MemoryEntryModel
+from .schemas import (
+    ActionStep, ExecutionStepRecord, GoalModel, MemoryEntryModel,
+    ExecutionMetrics, ExecutionContext, ExecutionResult
+)
 
 if TYPE_CHECKING:
     from .agi_controller import SymbolicAGI
+    from .execution_metrics import ExecutionMetrics as ExecutionMetricsModule, PerformanceMonitor
+    from .execution_strategies import HybridExecutionStrategy
+    from .perception_processor import PerceptionProcessor
 
 
 class ExecutionState(Enum):
@@ -36,6 +39,11 @@ class ExecutionUnit:
     def __init__(self, agi: "SymbolicAGI"):
         self.agi = agi
         self.current_state = ExecutionState.IDLE
+        
+        # Import modules here to avoid circular imports
+        from .execution_metrics import PerformanceMonitor
+        from .execution_strategies import HybridExecutionStrategy
+        from .perception_processor import PerceptionProcessor
         
         # Modular components
         self.performance_monitor = PerformanceMonitor()
@@ -74,11 +82,16 @@ class ExecutionUnit:
                     return current_val
                 except (KeyError, TypeError) as e:
                     logging.warning(
-                        "Could not resolve '{{{}}}' in workspace: %s. Leaving as is.",
-                        placeholder,
-                        e,
+                        "Could not resolve workspace reference '%s': %s. Leaving as is.",
+                        placeholder, str(e)
                     )
-            return value_to_resolve
+                    return value_to_resolve
+            elif isinstance(value_to_resolve, dict):
+                return self._resolve_workspace_references(value_to_resolve, workspace)
+            elif isinstance(value_to_resolve, list):
+                return [_resolve_value(item) for item in value_to_resolve]
+            else:
+                return value_to_resolve
 
         resolved_params: dict[str, Any] = {}
         for key, value in parameters.items():
@@ -267,34 +280,56 @@ class ExecutionUnit:
             return []
 
     async def _handle_plan_failure(self, goal: "GoalModel", step: "ActionStep", error_msg: str, agent_name: str | None = None) -> None:
-        """Handle failure of a plan step."""
+        """Handle failure of a plan step with emotional state integration."""
         logging.warning(f"Plan failure for goal {goal.id}: {error_msg}")
+        
+        # Update emotional state for plan failure
+        if self.agi.consciousness:
+            self.agi.consciousness.update_emotional_state_from_outcome(
+                success=False,
+                task_difficulty=0.7  # Plan failures are generally more complex
+            )
+            
+            # Check if emotional regulation is needed
+            await self.agi.consciousness.regulate_emotional_extremes()
         
         failure_count = await self.agi.ltm.increment_failure_count(goal.id)
         
         if failure_count >= goal.max_failures:
             await self.agi.ltm.update_goal_status(goal.id, "failed")
-            logging.error(f"Goal {goal.id} abandoned after {failure_count} failures")
+            logging.error(f"Goal {goal.id} abandoned after {failure_count} failures")            # Major failure - significant emotional impact
+            if self.agi.consciousness:
+                self.agi.consciousness.update_emotional_state_from_outcome(
+                    success=False,
+                    task_difficulty=1.0  # Goal abandonment is maximum difficulty
+                )
         else:
             await self.agi.ltm.invalidate_plan(goal.id, error_msg)
             
         if agent_name:
-            await self._decay_trust(agent_name)
+            self._decay_trust(agent_name)
 
-    async def _decay_trust(self, agent_name: str) -> None:
+    def _decay_trust(self, agent_name: str) -> None:
         """Decrease trust in an agent due to poor performance."""
-        current_state = self.agi.agent_pool.get_agent_state(agent_name)
-        current_trust = current_state.get("trust_score", config.INITIAL_TRUST_SCORE)
-        new_trust = max(0.0, current_trust - config.TRUST_DECAY_RATE)
-        self.agi.agent_pool.update_trust_score(agent_name, new_trust, last_used=True)
+        # Use the new performance tracking system
+        self.agi.agent_pool.record_task_performance(agent_name, success=False, task_complexity=0.7)
+        
+        logging.info(f"Recorded task failure for agent {agent_name} - trust updated via performance tracking")
 
     async def _reflect_on_completed_goal(self, goal: "GoalModel") -> None:
-        """Reflect on a completed goal and record insights."""
+        """Reflect on a completed goal and record insights with emotional state integration."""
         self.current_state = ExecutionState.REFLECTING
         
         logging.info(f"Reflecting on completed goal: {goal.description}")
         
+        # Update emotional state for successful goal completion
         if self.agi.consciousness:
+            self.agi.consciousness.update_emotional_state_from_outcome(
+                success=True,
+                task_difficulty=0.8,  # Goal completion is significant achievement
+                duration=None  # Long-term achievement
+            )
+            
             self.agi.consciousness.add_life_event(
                 event_summary=f"Successfully completed goal: '{goal.description}'",
                 importance=0.8
@@ -312,7 +347,8 @@ class ExecutionUnit:
                     "goal_id": goal.id,
                     "goal_description": goal.description,
                     "status": "completed",
-                    "total_steps": len(goal.original_plan) if goal.original_plan else 0
+                    "total_steps": len(goal.original_plan) if goal.original_plan else 0,
+                    "emotional_context": self.agi.consciousness.emotional_state.to_dict() if self.agi.consciousness else None
                 }
             )
             await self.agi.memory.add_memory(memory_entry)

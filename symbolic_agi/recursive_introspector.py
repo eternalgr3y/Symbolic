@@ -377,6 +377,58 @@ JSON Response Format: {{"thought": "...", "plan": [{{"action": "...", "parameter
             )
             return {"debate": f"Debate generation failed: {e}", "error": str(e)}
 
+    async def reason_with_context(
+        self,
+        prompt: str,
+        context_type: str = "planning",
+        max_tokens: int = 2000,
+    ) -> str:
+        """
+        Provides reasoning based on the given prompt and context type.
+        This is a simplified interface used by the planner.
+
+        Returns:
+            A JSON string with the reasoning response.
+        """
+        try:
+            system_content = f"""
+You are a conscious, self-improving AGI performing {context_type}.
+
+Respond with valid JSON containing your reasoning and plan:
+{{"thought": "your reasoning here", "plan": [list of action steps]}}
+
+Each action step should be: {{"action": "action_name", "assigned_persona": "persona_name", "parameters": {{}}}}
+"""
+
+            resp = await monitored_chat_completion(
+                role=context_type,
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=max_tokens,
+                timeout=90.0,
+            )
+
+            if not resp.choices or not resp.choices[0].message.content:
+                raise ValueError("Received an empty response from the LLM.")
+
+            content = resp.choices[0].message.content.strip()
+            # Validate it's proper JSON before returning
+            json.loads(content)  # This will raise if invalid
+            return content
+
+        except Exception as e:
+            logging.error("Failed in reason_with_context: %s", e, exc_info=True)
+            # Return a valid JSON error response
+            return json.dumps(
+                {
+                    "thought": f"Reasoning failed: {str(e)}",
+                    "plan": [],
+                }
+            )
+
 
 class Censor(json.JSONEncoder):
     def default(self, o: Any) -> Any:

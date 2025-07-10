@@ -53,6 +53,7 @@ class MicroWorld:
                     "name": "Chest",
                     "location": "room1",
                     "state": "locked",
+                    "type": "chest",  # Add this line
                     "description": "A heavy wooden chest with a lock.",
                 },
                 {"name": "Rock", "location": "room2", "description": "A rough gray rock."},
@@ -351,12 +352,18 @@ class MicroWorld:
         obj = self.get_object(object_name)
         if not agent or not obj:
             return {"status": "failure", "description": "Agent or object not found."}
+        
+        # Debug logging
+        logging.info(f"DEBUG: Agent {agent_name} location: {agent.get('location')}")
+        logging.info(f"DEBUG: Object {object_name} location: {obj.get('location')}")
+        
         if agent["location"] != obj.get("location"):
             return {
                 "status": "failure",
-                "description": f"{agent_name} is not in the same location as {object_name}.",
+                "description": f"{agent_name} is not in the same location as {object_name}. Agent in {agent['location']}, object in {obj.get('location')}.",
             }
-
+    
+        # Handle the Chest specifically
         if object_name == "Chest":
             if obj.get("state") == "locked":
                 if "Key" in agent["inventory"]:
@@ -371,9 +378,10 @@ class MicroWorld:
                         "description": "The Chest is locked. You need a Key.",
                     }
             elif obj.get("state") == "unlocked":
+                obj["state"] = "open"
                 return {
                     "status": "success",
-                    "description": "The Chest is already unlocked.",
+                    "description": "Opened the Chest.",
                 }
             elif obj.get("state") == "open":
                 return {"status": "success", "description": "The Chest is already open."}
