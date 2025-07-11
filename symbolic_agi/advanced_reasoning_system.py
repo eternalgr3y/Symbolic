@@ -66,21 +66,15 @@ class AdvancedReasoningEngine:
         """Main reasoning entry point, orchestrating the cognitive process."""
         logging.info("Starting advanced reasoning for: %s...", problem[:100])
 
-        # Step 1: Use an LLM to perform nuanced problem analysis, informed by the Knowledge Base.
         analysis = await self._llm_analyze_problem(problem, context)
-
-        # Step 2: Select appropriate reasoning strategies based on the analysis.
         strategies = self._select_strategies(analysis)
         logging.info(f"Selected reasoning strategies: {[s.value for s in strategies]}")
 
-        # Step 3: Execute all selected reasoning strategies in parallel.
         reasoning_tasks = [self._execute_strategy(s, problem, context) for s in strategies]
         steps_results = await asyncio.gather(*reasoning_tasks)
 
-        # Filter out any strategies that failed to produce a result.
         steps = [step for step in steps_results if step]
 
-        # Step 4: Use an LLM to synthesize the results from various strategies into a final conclusion.
         chain = await self._synthesize_chain(steps, problem)
 
         self.reasoning_history.append(chain)
@@ -133,7 +127,7 @@ Respond with ONLY a valid JSON object with keys: "uncertainty", "creativity_requ
 
     def _select_strategies(self, analysis: Dict[str, Any]) -> List[ReasoningType]:
         """Select appropriate reasoning strategies based on problem analysis scores."""
-        strategies = {ReasoningType.DEDUCTIVE}  # Always include deductive reasoning.
+        strategies = {ReasoningType.DEDUCTIVE}
 
         if analysis.get("uncertainty", 0) > STRATEGY_SELECTION_THRESHOLD:
             strategies.add(ReasoningType.PROBABILISTIC)
@@ -211,13 +205,14 @@ Respond with ONLY a valid JSON object with keys: "final_conclusion", "overall_co
             )
         except Exception as e:
             logging.error(f"Reasoning synthesis failed: {e}")
-            # Fallback synthesis if LLM fails
-            best_step = max(steps, key=lambda s: s.confidence)
+            best_step = max(steps, key=lambda s: s.confidence) if steps else None
+            if not best_step:
+                return ReasoningChain("chain_fallback_empty", [], "Reasoning and synthesis failed.", 0.0, [], [])
             return ReasoningChain(
                 chain_id=f"chain_fallback_{uuid.uuid4().hex[:8]}",
                 steps=steps,
                 final_conclusion=f"Fallback Conclusion: The most confident reasoning was {best_step.reasoning_type.name}, which concluded: {best_step.conclusion}",
-                overall_confidence=best_step.confidence * 0.8, # Penalize for failed synthesis
+                overall_confidence=best_step.confidence * 0.8,
                 reasoning_path=[s.step_id for s in steps],
                 alternatives_considered=[{"reason": "LLM Synthesis Failed", "conclusion": "Used best-step fallback."}]
             )

@@ -1,89 +1,118 @@
 # symbolic_agi/api_client.py
-"""
-Initializes and provides a shared, monitored asynchronous OpenAI client.
-"""
-
 import os
+import logging
 from typing import Any, cast
 
-from openai import APIError, AsyncOpenAI
+from openai import APIError, AsyncOpenAI, AuthenticationError
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.create_embedding_response import CreateEmbeddingResponse
 
 from . import config, metrics
 
-
+# Initialize the client
 def get_openai_client() -> AsyncOpenAI:
-    """
-    Initializes and returns a singleton instance of the AsyncOpenAI client.
-    """
+    """Get the OpenAI client with proper configuration."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set.")
-
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
     return AsyncOpenAI(api_key=api_key)
 
-
-# Shared client instance
+# Global client instance
 client = get_openai_client()
 
+# Token usage tracking
+usage_tracker = {
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_cost": 0.0
+}
 
-async def monitored_chat_completion(role: str, **kwargs: Any) -> ChatCompletion:
-    """
-    A wrapper around the OpenAI client's chat completion create method
-    that records Prometheus metrics for latency, token usage, and errors.
-    It selects a model tier based on the cognitive role of the request.
-    """
-    high_stakes_roles = {"planner", "qa", "meta"}
-    model_to_use = (
-        config.HIGH_STAKES_MODEL if role in high_stakes_roles else config.FAST_MODEL
-    )
+def log_token_usage(response: Any, model: str = "gpt-4-turbo-preview") -> None:
+    """Log token usage from API response."""
+    if hasattr(response, 'usage') and response.usage:
+        usage = response.usage
+        usage_tracker["total_tokens"] += usage.total_tokens
+        usage_tracker["prompt_tokens"] += usage.prompt_tokens
+        
+        # Only log completion tokens if they exist (chat completions)
+        if hasattr(usage, 'completion_tokens'):
+            usage_tracker["completion_tokens"] += usage.completion_tokens
+            completion_tokens = usage.completion_tokens
+        else:
+            # For embeddings, no completion tokens
+            completion_tokens = 0
+        
+        # Estimate cost (adjust rates as needed)
+        if "gpt-4" in model:
+            prompt_cost = usage.prompt_tokens * 0.03 / 1000
+            completion_cost = completion_tokens * 0.06 / 1000
+        else:
+            prompt_cost = usage.prompt_tokens * 0.001 / 1000
+            completion_cost = completion_tokens * 0.002 / 1000
+            
+        total_cost = prompt_cost + completion_cost
+        usage_tracker["total_cost"] += total_cost
 
+def get_usage_report() -> dict:
+    """Get current usage statistics."""
+    return usage_tracker.copy()
+
+async def monitored_chat_completion(
+    client: AsyncOpenAI,
+    model: str = "gpt-4-turbo-preview",
+    **kwargs
+) -> ChatCompletion:
+    """Wrapper for chat completions with monitoring."""
     try:
-        with metrics.API_CALL_LATENCY.labels(model=model_to_use).time():
-            response = cast(
-                "ChatCompletion",
-                await client.chat.completions.create(model=model_to_use, **kwargs),
-            )
-
-        if response.usage:
-            metrics.LLM_TOKEN_USAGE.labels(model=model_to_use, type="prompt").inc(
-                response.usage.prompt_tokens
-            )
-            metrics.LLM_TOKEN_USAGE.labels(model=model_to_use, type="completion").inc(
-                response.usage.completion_tokens
-            )
-
+        response = await client.chat.completions.create(
+            model=model,
+            **kwargs
+        )
+        
+        # Log usage
+        log_token_usage(response, model)
+        
+        # Update metrics
+        if hasattr(response, 'usage') and response.usage:
+            metrics.TOKEN_USAGE_TOTAL.labels(
+                role="system",
+                model=model,
+                type="prompt"
+            ).inc(response.usage.prompt_tokens)
+            
+            metrics.TOKEN_USAGE_TOTAL.labels(
+                role="system",
+                model=model,
+                type="completion"
+            ).inc(response.usage.completion_tokens)
+        
         return response
+        
+    except AuthenticationError as e:
+        logging.error("Authentication error: Check your API key")
+        raise
     except APIError as e:
-        error_type = type(e).__name__
-        metrics.API_CALL_ERRORS.labels(model=model_to_use, error_type=error_type).inc()
-        raise e
+        logging.error(f"API error: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in chat completion: {e}")
+        raise
 
-
-async def monitored_embedding_creation(**kwargs: Any) -> CreateEmbeddingResponse:
-    """
-    A wrapper around the OpenAI client's embedding create method
-    that records Prometheus metrics.
-    """
-    model_name = kwargs.get("model", "unknown")
+async def monitored_embedding_creation(
+    client: AsyncOpenAI,
+    **kwargs
+) -> CreateEmbeddingResponse:
+    """Wrapper for embedding creation with monitoring."""
     try:
-        with metrics.API_CALL_LATENCY.labels(model=model_name).time():
-            response: CreateEmbeddingResponse = await client.embeddings.create(**kwargs)
-
-        if response.usage:
-            metrics.LLM_TOKEN_USAGE.labels(model=model_name, type="prompt").inc(
-                response.usage.prompt_tokens
-            )
-            completion_tokens = (
-                response.usage.total_tokens - response.usage.prompt_tokens
-            )
-            metrics.LLM_TOKEN_USAGE.labels(model=model_name, type="completion").inc(
-                completion_tokens
-            )
-
+        response = await client.embeddings.create(**kwargs)
+        
+        # Log usage
+        if hasattr(response, 'usage'):
+            log_token_usage(response, kwargs.get('model', 'text-embedding-ada-002'))
+        
         return response
-    except APIError as e:
-        error_type = type(e).__name__
-        metrics.API_CALL_ERRORS.labels(model=model_name, error_type=error_type).inc()
-        raise e
+        
+    except Exception as e:
+        logging.error(f"Error creating embeddings: {e}")
+        raise

@@ -48,3 +48,6 @@ htmlcov/
 
 # Data and output (if not needed in repo)
 data/
+OPUS_ENHANCEMENT_REQUEST.md
+OPUS_PROMPT_READY.md
+Advanced Tools.toolsets.jsonc

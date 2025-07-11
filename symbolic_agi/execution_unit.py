@@ -388,8 +388,9 @@ class ExecutionUnit:
             )
         
         if self.agi.memory:
+            from .schemas import MemoryEntryModel, MemoryType
             memory_entry = MemoryEntryModel(
-                type="reflection",
+                type=MemoryType.REFLECTION,
                 content={
                     "goal_id": goal.id,
                     "goal_description": goal.description,

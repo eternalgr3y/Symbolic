@@ -1,150 +1,104 @@
 # symbolic_agi/goal_management.py
-
-import asyncio
 import logging
-import uuid
-from collections import deque
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
-from queue import PriorityQueue
-from typing import Dict, List, Optional, Any, Callable
+from typing import TYPE_CHECKING, List, Optional
 
-class GoalPriority(Enum):
-    LOW = 3
-    MEDIUM = 2
-    HIGH = 1
-    CRITICAL = 0
+from .schemas import GoalModel, GoalStatus, MemoryEntryModel, MemoryType
 
-class GoalStatus(Enum):
-    QUEUED = "queued"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    PAUSED = "paused"
-    CANCELLED = "cancelled"
-
-@dataclass(order=False)
-class EnhancedGoal:
-    """Represents a sophisticated, stateful goal for the AGI."""
-    priority: GoalPriority = GoalPriority.MEDIUM
-    id: str = field(default_factory=lambda: str(uuid.uuid4().hex[:8]))
-    description: str = ""
-    status: GoalStatus = GoalStatus.QUEUED
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    retry_count: int = 0
-    max_retries: int = 3
-    timeout_seconds: int = 300  # 5 minutes default
-    context: Dict[str, Any] = field(default_factory=dict)
-    dependencies: List[str] = field(default_factory=list)
-
-    def __lt__(self, other: "EnhancedGoal") -> bool:
-        """For priority queue ordering. Lower number = higher priority."""
-        return self.priority.value < other.priority.value
+if TYPE_CHECKING:
+    from .long_term_memory import LongTermMemory
 
 class GoalManager:
-    """
-    Advanced goal management with queuing, prioritization, and lifecycle management.
-    This is the single source of truth for goal state.
-    """
+    """Manages the AGI's goals and objectives."""
+    
+    def __init__(self, ltm: "LongTermMemory"):
+        self.ltm = ltm
+        self.goals: List[GoalModel] = []
+        self._load_active_goals()
 
-    def __init__(self, max_concurrent_goals: int = 3):
-        self.goal_queue: "PriorityQueue[EnhancedGoal]" = PriorityQueue()
-        self.active_goals: Dict[str, EnhancedGoal] = {}
-        self.completed_goals: Dict[str, EnhancedGoal] = {}
-        self.goal_history: deque[EnhancedGoal] = deque(maxlen=100)
-        self.max_concurrent = max_concurrent_goals
-        self.shutdown_event = asyncio.Event()
-        self.goal_completion_callbacks: List[Callable[[EnhancedGoal], Any]] = []
-        logging.info("GoalManager initialized with max concurrency of %d.", max_concurrent_goals)
+    def _load_active_goals(self) -> None:
+        """Load active goals from memory."""
+        # In a real implementation, this would load from persistent storage
+        pass
 
-    def add_goal(self, description: str, priority: GoalPriority = GoalPriority.MEDIUM, 
-                 context: Optional[Dict] = None, dependencies: Optional[List[str]] = None) -> str:
-        """Adds a new goal to the queue."""
-        goal = EnhancedGoal(
-            description=description,
-            priority=priority,
-            context=context or {},
-            dependencies=dependencies or []
-        )
-        self.goal_queue.put(goal)
-        logging.info(f"📝 Added goal [{goal.id}]: '{description}' (Priority: {priority.name})")
-        return goal.id
+    def add_goal(self, goal: GoalModel) -> None:
+        """Add a new goal."""
+        self.goals.append(goal)
+        
+        # Can't use async here, would need to refactor
+        # For now, just log
+        logging.info(f"[GoalManager] Added goal: {goal.description}")
 
-    def get_next_goal(self) -> Optional[EnhancedGoal]:
-        """Gets the next available goal to process, respecting dependencies and concurrency."""
-        if self.goal_queue.empty() or len(self.active_goals) >= self.max_concurrent:
-            return None
+    def get_active_goals(self) -> List[GoalModel]:
+        """Get all active goals sorted by priority."""
+        active = [g for g in self.goals if g.status in [GoalStatus.PENDING, GoalStatus.ACTIVE]]
+        return sorted(active, key=lambda g: g.priority.value, reverse=True)
 
-        temp_goals = []
-        next_goal = None
+    def update_goal_status(self, goal_id: str, status: GoalStatus) -> bool:
+        """Update the status of a goal."""
+        for goal in self.goals:
+            if goal.id == goal_id:
+                goal.status = status
+                goal.updated_at = datetime.now(timezone.utc)
+                
+                if status == GoalStatus.COMPLETED:
+                    goal.completed_at = datetime.now(timezone.utc)
+                    
+                logging.info(f"[GoalManager] Goal {goal_id} status updated to {status.value}")
+                return True
+                
+        return False
 
-        while not self.goal_queue.empty():
-            candidate = self.goal_queue.get()
+    def complete_goal(self, goal_id: str) -> bool:
+        """Mark a goal as completed."""
+        return self.update_goal_status(goal_id, GoalStatus.COMPLETED)
 
-            if self._dependencies_satisfied(candidate):
-                next_goal = candidate
-                break
-            else:
-                temp_goals.append(candidate)
+    def fail_goal(self, goal_id: str, reason: str) -> bool:
+        """Mark a goal as failed."""
+        for goal in self.goals:
+            if goal.id == goal_id:
+                goal.status = GoalStatus.FAILED
+                goal.updated_at = datetime.now(timezone.utc)
+                goal.metadata["failure_reason"] = reason
+                
+                logging.info(f"[GoalManager] Goal {goal_id} failed: {reason}")
+                return True
+                
+        return False
 
-        for temp_goal in temp_goals:
-            self.goal_queue.put(temp_goal)
+    def get_goal_by_id(self, goal_id: str) -> Optional[GoalModel]:
+        """Get a goal by its ID."""
+        for goal in self.goals:
+            if goal.id == goal_id:
+                return goal
+        return None
 
-        return next_goal
+    def cancel_goal(self, goal_id: str) -> bool:
+        """Cancel a goal."""
+        return self.update_goal_status(goal_id, GoalStatus.CANCELLED)
 
-    def _dependencies_satisfied(self, goal: EnhancedGoal) -> bool:
-        """Checks if all dependencies for a goal are completed successfully."""
-        for dep_id in goal.dependencies:
-            completed_goal = self.completed_goals.get(dep_id)
-            if not completed_goal or completed_goal.status != GoalStatus.COMPLETED:
-                return False
-        return True
+    def get_completed_goals(self) -> List[GoalModel]:
+        """Get all completed goals."""
+        return [g for g in self.goals if g.status == GoalStatus.COMPLETED]
 
-    def start_goal(self, goal: EnhancedGoal):
-        """Marks a goal as started and moves it to the active dictionary."""
-        goal.status = GoalStatus.PROCESSING
-        goal.started_at = datetime.now(timezone.utc)
-        self.active_goals[goal.id] = goal
-        logging.info(f"🚀 Starting goal [{goal.id}]")
+    def get_failed_goals(self) -> List[GoalModel]:
+        """Get all failed goals."""
+        return [g for g in self.goals if g.status == GoalStatus.FAILED]
 
-    async def complete_goal(self, goal_id: str, result: Dict[str, Any]):
-        """Marks a goal as completed and moves it to history."""
-        if goal_id in self.active_goals:
-            goal = self.active_goals.pop(goal_id)
-            goal.status = GoalStatus.COMPLETED
-            goal.completed_at = datetime.now(timezone.utc)
-            goal.result = result
-            self.completed_goals[goal.id] = goal
-            self.goal_history.append(goal)
-            logging.info(f"✅ Completed goal [{goal.id}]")
-
-            for callback in self.goal_completion_callbacks:
-                await asyncio.to_thread(callback, goal)
-
-    def fail_goal(self, goal_id: str, error: str):
-        """Marks a goal as failed and moves it to history."""
-        if goal_id in self.active_goals:
-            goal = self.active_goals.pop(goal_id)
-            goal.status = GoalStatus.FAILED
-            goal.error = error
-            goal.completed_at = datetime.now(timezone.utc)
-            self.completed_goals[goal.id] = goal
-            self.goal_history.append(goal)
-            logging.error(f"❌ Failed goal [{goal.id}]: {error}")
-
-    def get_status_summary(self) -> Dict[str, Any]:
-        """Gets a comprehensive status summary of the goal management system."""
-        return {
-            "queued_goals": self.goal_queue.qsize(),
-            "active_goals_count": len(self.active_goals),
-            "active_goals": [g.description for g in self.active_goals.values()],
-            "completed_count": len([g for g in self.completed_goals.values() if g.status == GoalStatus.COMPLETED]),
-            "failed_count": len([g for g in self.completed_goals.values() if g.status == GoalStatus.FAILED]),
-            "total_processed_in_history": len(self.goal_history),
-            "max_concurrency": self.max_concurrent
-        }
+    def cleanup_old_goals(self, days: int = 30) -> int:
+        """Remove completed/failed goals older than specified days."""
+        from datetime import timedelta
+        
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        old_goals = []
+        
+        for goal in self.goals:
+            if goal.status in [GoalStatus.COMPLETED, GoalStatus.FAILED, GoalStatus.CANCELLED]:
+                if goal.updated_at and goal.updated_at < cutoff:
+                    old_goals.append(goal)
+                    
+        for goal in old_goals:
+            self.goals.remove(goal)
+            
+        logging.info(f"[GoalManager] Cleaned up {len(old_goals)} old goals")
+        return len(old_goals)

@@ -85,9 +85,9 @@ class PerceptionProcessor:
         
         # Add to memory for future reference
         if self.agi.memory:
-            from .schemas import MemoryEntryModel
+            from .schemas import MemoryEntryModel, MemoryType
             memory_entry = MemoryEntryModel(
-                type="perception",
+                type=MemoryType.PERCEPTION,
                 content={
                     "type": perception.type,
                     "source": perception.source,

@@ -1,15 +1,16 @@
-# symbolic_agi/agi_controller.py
-
 import asyncio
 import atexit
 import logging
 import os
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
 from playwright.async_api import Browser, Page, async_playwright
 from watchfiles import awatch
+
+if TYPE_CHECKING:
+    from .consciousness import Consciousness
 
 from . import config
 from . import reasoning_skills
@@ -26,7 +27,12 @@ from .micro_world import MicroWorld
 from .planner import Planner
 from .recursive_introspector import RecursiveIntrospector
 from .schemas import (
-    ActionStep, AGIConfig, EmotionalState, GoalModel, MessageModel, PerceptionEvent
+    ActionStep,
+    AGIConfig,
+    EmotionalState,
+    GoalModel,
+    MessageModel,
+    PerceptionEvent
 )
 from .skill_manager import SkillManager
 from .symbolic_identity import SymbolicIdentity
@@ -37,283 +43,172 @@ if TYPE_CHECKING:
     from .consciousness import Consciousness
 
 class SymbolicAGI:
-    """
-    The core class for the Symbolic AGI. Acts as a dependency container and
-    top-level manager for its functional units.
-    """
-
-    cfg: AGIConfig
-    name: str
-    message_bus: RedisMessageBus
-    memory: SymbolicMemory
-    knowledge_base: KnowledgeBase
-    identity: SymbolicIdentity
-    ltm: LongTermMemory
-    skills: SkillManager
-    agent_pool: DynamicAgentPool
-    evaluator: SymbolicEvaluator
-    introspector: RecursiveIntrospector
-    planner: Planner
-    consciousness: Optional["Consciousness"]
-    meta_cognition: MetaCognitionUnit
-    goal_manager: GoalManager
-    execution_engine: ExecutionEngine
-    world: MicroWorld
-    tools: ToolPlugin
-    emotional_state: EmotionalState
-    _perception_task: Optional[asyncio.Task[None]]
-    perception_buffer: deque[PerceptionEvent]
-    agent_tasks: List[asyncio.Task[None]]
-    browser: Optional[Browser] = None
-    page: Optional[Page] = None
-
-    def __init__(
-        self, cfg: Optional[AGIConfig] = None, world: Optional[MicroWorld] = None
-    ) -> None:
-        self.cfg = cfg or AGIConfig()
-        self.name = self.cfg.name
-        self.message_bus = RedisMessageBus()
-
-        # Core components are initialized in the create() factory method
-        self.memory = None # type: ignore
-        self.knowledge_base = None # type: ignore
-        self.identity = None # type: ignore
-        self.ltm = None # type: ignore
-        self.skills = None # type: ignore
-        self.agent_pool = None # type: ignore
-        self.planner = None # type: ignore
-        self.introspector = None # type: ignore
-        self.evaluator = None # type: ignore
-        self.consciousness = None
-        self.meta_cognition = None # type: ignore
-        self.goal_manager = None # type: ignore
-        self.execution_engine = None # type: ignore
-
-        # Ready-to-use components
-        self.world = world or MicroWorld()
-        self.tools = ToolPlugin(self)
-        self.emotional_state = EmotionalState()
-
-        # Runtime state
-        self._perception_task = None
-        self.perception_buffer = deque(maxlen=100)
-        self.agent_tasks = []
-
-        atexit.register(self._sync_shutdown)
-
+    """The core class for the Symbolic AGI. Acts as a dependency container."""
+    
+    def __init__(self, cfg: AGIConfig):
+        self.cfg = cfg
+        self.shutdown_event = asyncio.Event()
+        self._background_tasks: list[asyncio.Task] = []
+        self._execution_engine_task: Optional[asyncio.Task] = None
+        self._perception_task: Optional[asyncio.Task] = None
+        
     @classmethod
-    async def create(cls, cfg: Optional[AGIConfig] = None, world: Optional[MicroWorld] = None, db_path: str = config.DB_PATH) -> "SymbolicAGI":
+    async def create(cls) -> "SymbolicAGI":
         """Asynchronously initialize the AGI and its components in the correct order."""
-        instance = cls(cfg, world)
+        cfg = config.get_config()
+        instance = cls(cfg)
 
+        instance.message_bus = RedisMessageBus()
         await instance.message_bus._initialize()
-
-        instance.memory = await SymbolicMemory.create(client, db_path=db_path)
-        instance.knowledge_base = await KnowledgeBase.create(db_path=db_path, memory_system=instance.memory)
-        instance.identity = await SymbolicIdentity.create(instance.memory, db_path=db_path)
-        instance.ltm = await LongTermMemory.create(db_path=db_path)
-        instance.skills = await SkillManager.create(db_path=db_path, message_bus=instance.message_bus)
+        instance.memory = await SymbolicMemory.create(client)
+        instance.identity = await SymbolicIdentity.create(instance.memory)
+        instance.knowledge_base = await KnowledgeBase.create(memory_system=instance.memory)
+        instance.ltm = await LongTermMemory.create()
+        instance.skills = await SkillManager.create(message_bus=instance.message_bus)
         instance.agent_pool = DynamicAgentPool(instance.message_bus, instance.skills)
+        instance.consciousness = await consciousness.Consciousness.create()
         instance.evaluator = SymbolicEvaluator(instance.identity)
-        instance.introspector = RecursiveIntrospector(instance.identity, client, debate_timeout=instance.cfg.debate_timeout_seconds)
+        instance.tools = ToolPlugin(instance)
 
-        if instance.consciousness is None:
-            from .consciousness import Consciousness as ConsciousnessClass
-            instance.consciousness = await ConsciousnessClass.create(db_path=db_path)
-
-        instance.planner = Planner(
-            introspector=instance.introspector,
-            skill_manager=instance.skills,
-            agent_pool=instance.agent_pool,
-            tool_plugin=instance.tools,
+        instance.introspector = RecursiveIntrospector(
+            identity=instance.identity,
+            client=client,
+            debate_timeout=instance.cfg.debate_timeout_seconds
         )
-
+        
+        instance.world = MicroWorld(workspace_dir=instance.cfg.workspace_dir)
+        instance.planner = Planner(
+            tools=instance.tools,
+            agent_pool=instance.agent_pool,
+            skills=instance.skills,
+            introspector=instance.introspector
+        )
+        
+        instance.goal_manager = GoalManager(instance.ltm)
+        instance.execution_engine = ExecutionEngine(
+            agi=instance,
+            goal_manager=instance.goal_manager,
+            planner=instance.planner,
+            introspector=instance.introspector
+        )
+        
         instance.meta_cognition = MetaCognitionUnit(instance)
+        instance.emotional_state = EmotionalState()
+        instance.perception_buffer = deque(maxlen=100)
+        instance.agent_tasks: List[asyncio.Task] = []
+        instance.browser: Optional[Browser] = None
+        instance.page: Optional[Page] = None
 
-        instance.goal_manager = GoalManager(max_concurrent_goals=3)
-        instance.execution_engine = ExecutionEngine(instance, instance.goal_manager)
-
-        await instance._create_essential_agents()
-
-        instance.message_bus.subscribe(instance.name)
+        # Register sync shutdown handler
+        instance._sync_shutdown = lambda: asyncio.run(instance.shutdown())
+        atexit.register(instance._sync_shutdown)
+        
+        # Create essential agents
+        instance._create_essential_agents()
+        
         return instance
 
-    async def _create_essential_agents(self) -> None:
+    def _create_essential_agents(self) -> None:
         """Create essential agents that the AGI needs to function properly."""
-        essential_agents = [
-            {"name": "QA_Agent_Alpha", "persona": "qa"},
-            {"name": "Research_Agent_Beta", "persona": "researcher"},  
-            {"name": "Code_Agent_Gamma", "persona": "developer"},
-            {"name": "Analysis_Agent_Delta", "persona": "analyst"},
-        ]
-
-        for agent_data in essential_agents:
-            await asyncio.sleep(0)
-            self.agent_pool.add_agent(
-                name=agent_data["name"],
-                persona=agent_data["persona"], 
-                memory=self.memory
-            )
-            logging.info(f"Auto-created essential agent: {agent_data['name']} ({agent_data['persona']})")
+        essential_personas = ["qa", "research", "coding"]
+        for persona in essential_personas:
+            agent_name = f"{persona.title()}_Agent_{persona[:2].upper()}"
+            if agent_name not in self.agent_pool.agents:
+                self.agent_pool.create_agent(agent_name, persona)
+                logging.info(f"Auto-created essential agent: {agent_name} ({persona})")
 
     async def start_background_tasks(self) -> None:
-        """Start all background tasks including the new ExecutionEngine."""
-        playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(headless=True)
-        logging.info("Playwright browser instance started.")
+        """Starts and manages all background tasks."""
+        # Start execution engine
+        self._execution_engine_task = asyncio.create_task(
+            self.execution_engine.run()
+        )
+        self._background_tasks.append(self._execution_engine_task)
+        
+        # Start perception processing
+        self._perception_task = asyncio.create_task(
+            self._process_perception_events()
+        )
+        self._background_tasks.append(self._perception_task)
+        
+        # Start meta-cognition
+        await self.meta_cognition.run_background_tasks()
 
-        if self.meta_cognition:
-            await self.meta_cognition.run_background_tasks()
+    async def _process_perception_events(self) -> None:
+        """Process perception events from the buffer."""
+        while not self.shutdown_event.is_set():
+            try:
+                if self.perception_buffer:
+                    event = self.perception_buffer.popleft()
+                    # Process the event with timeout
+                    try:
+                        await asyncio.wait_for(
+                            self._handle_perception_event(event),
+                            timeout=5.0
+                        )
+                    except asyncio.TimeoutError:
+                        logging.warning(f"Perception event processing timed out: {event}")
+                    
+                await asyncio.sleep(1.0)  # Increased from 0.1s to reduce CPU usage
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logging.error(f"Error processing perception event: {e}")
+                await asyncio.sleep(5.0)  # Back off on errors
 
-        if self.execution_engine:
-            self._execution_engine_task = asyncio.create_task(self.execution_engine.execution_loop())
-            logging.info("Execution engine loop started.")
+    async def _handle_perception_event(self, event: PerceptionEvent) -> None:
+        """Handle a single perception event."""
+        logging.debug(f"Processing perception event: {event}")
+        # Add actual event processing logic here if needed
 
-        if self._perception_task is None:
-            logging.info("Controller: Starting background perception task...")
-            self._perception_task = asyncio.create_task(self._workspace_monitor_task())
-        else:
-            logging.warning("Controller: Background perception task already started.")
+    async def shutdown(self):
+        """Gracefully shuts down all components."""
+        logging.info("Shutting down AGI components...")
+        self.shutdown_event.set()
+        
+        # Cancel background tasks with timeout
+        for task in self._background_tasks:
+            if task and not task.done():
+                task.cancel()
+                
+        # Wait for tasks to complete with timeout
+        if self._background_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._background_tasks, return_exceptions=True),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logging.warning("Background tasks didn't shutdown within timeout")
+            
+        # Shutdown components with error handling
+        shutdown_tasks = []
+        
+        if hasattr(self, 'agent_pool'):
+            shutdown_tasks.append(self._safe_shutdown(self.agent_pool.shutdown(), "agent_pool"))
+        if hasattr(self, 'message_bus'):
+            shutdown_tasks.append(self._safe_shutdown(self.message_bus.shutdown(), "message_bus"))
+        # Note: meta_cognition doesn't have shutdown method, skip it
+            
+        if shutdown_tasks:
+            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+            
+        logging.info("AGI shutdown complete")
 
-    def _sync_shutdown(self) -> None:
-        """Synchronous shutdown for atexit."""
+    async def _safe_shutdown(self, coro, component_name: str):
+        """Safely shutdown a component with timeout and error handling."""
         try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                loop.create_task(self.shutdown())
-            else:
-                asyncio.run(self.shutdown())
-        except RuntimeError:
-            asyncio.run(self.shutdown())
-
-    async def shutdown(self) -> None:
-        """Shutdown all components including the new ExecutionEngine."""
-        logging.info("Controller: Initiating shutdown...")
-
-        if self.goal_manager:
-            self.goal_manager.shutdown_event.set()
-
-        if self.execution_engine:
-            # The execution engine loop will stop due to the shutdown_event
-            pass
-
-        if self.meta_cognition:
-            await self.meta_cognition.shutdown()
-
-        if self._perception_task and not self._perception_task.done():
-            self._perception_task.cancel()
-            await asyncio.gather(self._perception_task, return_exceptions=True)
-
-        for task in self.agent_tasks:
-            task.cancel()
-        await asyncio.gather(*self.agent_tasks, return_exceptions=True)
-        logging.info("All specialist agent tasks have been cancelled.")
-
-        if self.browser:
-            await self.browser.close()
-        if self.memory:
-            await self.memory.shutdown()
-        if self.message_bus:
-            await self.message_bus.shutdown()
-
-        logging.info("Controller: Shutdown complete.")
-
-    async def process_goal_with_plan(self, goal_description: str) -> Dict[str, Any]:
-        """
-        Process a goal by decomposing it into a plan and executing it.
-        This method is called by the ExecutionEngine and is focused purely on execution.
-        """
-        try:
-            logging.info(f"Executing plan for goal: {goal_description}")
-
-            planner_output = await self.planner.decompose_goal_into_plan(goal_description, "")
-
-            if not planner_output.plan:
-                return {"status": "failure", "description": "Failed to create a valid plan for the goal"}
-
-            plan = planner_output.plan
-            logging.info(f"📋 Created plan with {len(plan)} steps for goal '{goal_description}'")
-
-            results = []
-            for i, step in enumerate(plan, 1):
-                logging.info(f"🔧 Executing step {i}/{len(plan)}: {step.action}")
-
-                result = await self.execute_single_action(step)
-                results.append(result)
-
-                if result.get("status") != "success":
-                    logging.error(f"❌ Step {i} failed: {result.get('description', 'Unknown error')}")
-                    return {
-                        "status": "failure",
-                        "description": f"Plan execution failed at step {i}: {result.get('description')}",
-                        "failed_step": step.model_dump(),
-                        "results": results
-                    }
-                else:
-                    logging.info(f"✅ Step {i} completed successfully.")
-
-            successful_steps = [r for r in results if r.get("status") == "success"]
-            final_result = {
-                "status": "success",
-                "description": f"Successfully executed plan for goal: {goal_description}",
-                "steps_executed": len(results),
-                "steps_successful": len(successful_steps),
-                "results": results[-5:]
-            }
-
-            logging.info(f"🏁 Plan execution complete for goal: {goal_description}")
-            return final_result
-
+            await asyncio.wait_for(coro, timeout=5.0)
+            logging.debug(f"Successfully shutdown {component_name}")
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout shutting down {component_name}")
         except Exception as e:
-            logging.error(f"❌ Goal processing failed critically: {e}", exc_info=True)
-            return {"status": "failure", "description": f"Critical error during goal processing: {e}"}
+            logging.error(f"Error shutting down {component_name}: {e}")
 
-    async def execute_single_action(self, step: ActionStep) -> Dict[str, Any]:
-        """Execute a single action step, delegating to the ToolPlugin."""
-        try:
-            logging.info(f"Executing action: {step.action} with parameters: {step.parameters}")
+    def get_current_state(self) -> str:
+        """Returns a summary of the AGI's current state."""
+        active_goals = self.goal_manager.get_active_goals()
+        return f"Active goals: {len(active_goals)}, Energy: {self.identity.cognitive_energy}"
 
-            if hasattr(self.tools, step.action):
-                action_func = getattr(self.tools, step.action)
-                result = await action_func(**step.parameters)
-            else:
-                result = {"status": "failure", "description": f"Unknown action: {step.action}"}
-
-            if result.get("status") == "success":
-                logging.info(f"✅ Action '{step.action}' completed successfully")
-            else:
-                logging.warning(f"⚠️ Action '{step.action}' failed: {result.get('description', 'Unknown error')}")
-
-            return result
-
-        except Exception as e:
-            error_result = {
-                "status": "failure",
-                "description": f"Action execution error: {str(e)}",
-                "action": step.action,
-                "error_type": type(e).__name__
-            }
-            logging.error(f"❌ Action '{step.action}' failed with exception: {e}", exc_info=True)
-            return error_result
-
-    async def _workspace_monitor_task(self) -> None:
-        """Monitors the workspace directory for changes."""
-        logging.info("Async workspace watchdog started.")
-        workspace_path = os.path.abspath(self.tools.workspace_dir)
-        try:
-            async for changes in awatch(workspace_path):
-                for change_type, path in changes:
-                    file_path = os.path.relpath(path, workspace_path)
-                    logging.info("PERCEPTION: Detected file change '%s' in workspace: %s", change_type.name, file_path)
-                    event = PerceptionEvent(
-                        type="file_modified",
-                        source="workspace",
-                        content={"change": change_type.name, "path": file_path},
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                    )
-                    self.perception_buffer.append(event)
-        except asyncio.CancelledError:
-            logging.info("Async workspace watchdog has been cancelled.")
-            raise
-        except Exception as e:
-            logging.error("Error in workspace watchdog task: %s", e, exc_info=True)
+# Import Consciousness at the bottom to avoid circular imports
+from . import consciousness

@@ -1,70 +1,28 @@
 # symbolic_agi/metrics.py
-"""
-Central registry for all Prometheus metrics used in the SymbolicAGI project.
-"""
+"""Metrics collection for the AGI system."""
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram, Summary
 
-# --- LLM API Metrics ---
+# System Metrics
+MEMORY_ENTRIES = Gauge('agi_memory_entries_total', 'Total number of memory entries')
+ACTIVE_GOALS = Gauge('agi_active_goals', 'Number of active goals')
+COGNITIVE_ENERGY = Gauge('agi_cognitive_energy', 'Current cognitive energy level')
 
-LLM_TOKEN_USAGE = Counter(
-    "symbolic_agi_llm_token_usage_total",
-    "Total number of LLM tokens used",
-    ["model", "type"],  # 'type' can be 'prompt' or 'completion'
-)
+# Agent Metrics
+AGENT_TRUST = Gauge('agi_agent_trust', 'Agent trust score', ['agent_name', 'persona'])
+AGENT_TASKS = Counter('agi_agent_tasks_total', 'Total tasks delegated to agents', ['agent_name', 'status'])
 
-API_CALL_LATENCY = Histogram(
-    "symbolic_agi_api_call_latency_seconds",
-    "Latency of API calls to LLM providers",
-    ["model"],
-)
+# Token Usage Metrics
+TOKEN_USAGE_TOTAL = Counter('agi_token_usage_total', 'Total tokens used', ['role', 'model', 'type'])
+TOKEN_COST_TOTAL = Counter('agi_token_cost_dollars', 'Total cost in dollars', ['model'])
 
-API_CALL_ERRORS = Counter(
-    "symbolic_agi_api_call_errors_total",
-    "Total number of failed API calls",
-    ["model", "error_type"],
-)
+# Goal Metrics
+GOAL_DURATION = Histogram('agi_goal_duration_seconds', 'Goal execution duration', ['status'])
+GOAL_STEPS = Histogram('agi_goal_steps', 'Number of steps per goal', ['status'])
 
-# --- AGI Core Metrics ---
+# Reasoning Metrics
+REASONING_DEPTH = Histogram('agi_reasoning_depth', 'Depth of reasoning chains')
+REASONING_DURATION = Summary('agi_reasoning_duration_seconds', 'Reasoning operation duration')
 
-AGI_CYCLE_DURATION = Histogram(
-    "symbolic_agi_cycle_duration_seconds",
-    "Duration of a single autonomous cognitive cycle",
-)
-
-ACTIVE_GOALS = Gauge(
-    "symbolic_agi_active_goals", "Current number of active goals in the LongTermMemory"
-)
-
-AGENT_TASKS_RUNNING = Gauge(
-    "symbolic_agi_agent_tasks_running",
-    "Current number of running specialist agent tasks",
-)
-
-AGENT_TRUST = Gauge(
-    "symbolic_agi_agent_trust_score",
-    "Current trust score of a specialist agent",
-    ["agent_name", "persona"],
-)
-
-# --- Memory Metrics ---
-
-MEMORY_ENTRIES = Gauge(
-    "symbolic_agi_memory_entries_total",
-    "Total number of entries in the symbolic memory",
-)
-
-FAISS_INDEX_VECTORS = Gauge(
-    "symbolic_agi_faiss_index_vectors_total",
-    "Total number of vectors in the FAISS index",
-)
-
-EMBEDDING_BUFFER_FLUSHES = Counter(
-    "symbolic_agi_embedding_buffer_flushes_total",
-    "Total number of times the embedding buffer has been flushed",
-)
-
-EMBEDDING_FLUSH_LATENCY_SECONDS = Histogram(
-    "symbolic_agi_embedding_flush_latency_seconds",
-    "Time taken to flush the embedding buffer",
-)
+# Error Metrics
+ERRORS_TOTAL = Counter('agi_errors_total', 'Total errors', ['component', 'error_type'])

@@ -1,0 +1,25 @@
+# requirements.txt
+
+# Web Framework
+fastapi
+uvicorn[standard]
+
+# UI
+streamlit
+pandas
+requests
+
+# Core Logic & Data
+pydantic
+pydantic-settings>=2.0.0
+
+# Database & ORM
+sqlalchemy
+aiosqlite
+
+# Vector Search
+faiss-cpu
+numpy
+
+# LLM/API - Add your specific library if needed, e.g., openai
+# openai
