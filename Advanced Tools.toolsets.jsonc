@@ -1,0 +1,32 @@
+{
+  "AGI Dev Tools": {
+    "tools": [
+      "Run AGI",
+      "Run Tests",
+      "Lint Code",
+      "Type Check",
+      "Deploy Cost Optimized",
+      "Mutation Test",
+      "Validate Prometheus"
+    ],
+    "description": "Essential tools for SymbolicAGI development and automation",
+    "icon": "rocket"
+  },
+  "Code Generation": {
+    "tools": [
+      "generateSkill",
+      "generateAgent",
+      "generateTest"
+    ],
+    "description": "Scripts for code and agent generation (add your own commands here)",
+    "icon": "zap"
+  },
+  "Automation & Maintenance": {
+    "tools": [
+      "cleanupMemory",
+      "backupDatabase"
+    ],
+    "description": "Maintenance and automation scripts for AGI (add your own commands here)",
+    "icon": "tools"
+  }
+}
