@@ -47,4 +47,12 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Data and output (if not needed in repo)
-data/
+data/.venv/
+env/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+coverage.xml
