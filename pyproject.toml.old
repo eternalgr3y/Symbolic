@@ -1,0 +1,183 @@
+# ================================================================
+#  pyproject.toml  —  Poetry‑compatible (Poetry 2.x)
+# ================================================================
+
+[tool.poetry]
+name         = "symbolic-agi"
+version      = "0.1.0"
+description  = "A symbolic AGI system with consciousness, meta‑cognition, and self‑modification capabilities"
+authors      = ["Your Name <your.email@example.com>"]
+license      = "MIT"
+readme       = "README.md"
+packages     = [{ include = "symbolic_agi" }]
+keywords     = ["agi", "ai", "consciousness", "symbolic", "meta-cognition"]
+homepage     = "https://github.com/yourusername/symbolic-agi"
+repository   = "https://github.com/yourusername/symbolic-agi"
+documentation = "https://github.com/yourusername/symbolic-agi"
+
+# ------------------------ Runtime deps --------------------------
+[tool.poetry.dependencies]
+python              = "^3.10"
+
+redis               = "^4.5"
+numpy               = "^1.24"
+faiss-cpu           = "^1.7"          # pin to 1.7.4 on Win+Py3.12 if needed
+pydantic            = "^2.0"
+openai              = "^1.0"
+anthropic           = "^0.7"
+selenium            = "^4.0"
+colorlog            = "^6.7"
+prometheus-client   = "^0.16"
+
+aiofiles            = "^23.0"
+aiohttp             = "^3.8"
+httpx               = "^0.24"
+fastapi             = "^0.100"
+uvicorn             = "^0.23"
+requests            = "^2.31"
+beautifulsoup4      = "^4.12"
+duckduckgo-search   = "^4.0"
+
+aiosqlite           = "^0.19"
+playwright          = "^1.40"
+
+# ------------------- Dev / test dependencies --------------------
+[tool.poetry.group.dev.dependencies]
+pytest            = "^7.0"
+pytest-asyncio    = "^0.21"
+pytest-mock       = "^3.10"
+pytest-cov        = "^4.1"
+pytest-timeout    = "^2.1"
+pytest-xdist      = "^3.3"
+
+mypy              = "^1.5"
+ruff              = "^0.1"
+black             = "^23.0"
+pre-commit        = "^3.3"
+grep              = "^0.3"
+
+# ---------------------- CLI entry point -------------------------
+[tool.poetry.scripts]
+symbolic-agi = "symbolic_agi.run_agi:main"
+
+# ----------------------- Build system ---------------------------
+[build-system]
+requires      = ["poetry-core>=1.7.0"]
+build-backend = "poetry.core.masonry.api"
+
+# -------------------- Ruff configuration -----------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["symbolic_agi", "tests"]
+exclude = [
+  ".bzr",".direnv",".eggs",".git",".git-rewrite",".hg",".mypy_cache",".nox",
+  ".pants.d",".pytype",".ruff_cache",".svn",".tox",".venv","__pypackages__",
+  "_build","buck-out","build","dist","node_modules","venv"
+]
+
+[tool.ruff.lint]
+select = ["E","W","F","I","B","C4","UP","ARG","SIM","TCH","PTH"]
+ignore = ["E501","B008","B904","C901","W191","E402","UP007"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101","ARG","FBT","PLR2004","S311"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["symbolic_agi"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# --------------------- MyPy configuration -----------------------
+[tool.mypy]
+python_version           = "3.10"
+warn_return_any          = true
+warn_unused_configs      = true
+disallow_untyped_defs    = true
+disallow_incomplete_defs = true
+check_untyped_defs       = true
+disallow_untyped_decorators = true
+no_implicit_optional     = true
+warn_redundant_casts     = true
+warn_unused_ignores      = true
+warn_no_return           = true
+warn_unreachable         = true
+strict_equality          = true
+show_error_codes         = true
+
+[[tool.mypy.overrides]]
+module = [
+  "faiss.*",
+  "tortoise.*",
+  "selenium.*",
+  "redis.*",
+  "prometheus_client.*",
+]
+ignore_missing_imports = true
+
+# -------------------- Pytest configuration ----------------------
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--cov=symbolic_agi",
+  "--cov-report=term-missing",
+  "--cov-report=html",
+  "--cov-report=xml",
+]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "integration: marks tests as integration tests",
+  "unit: marks tests as unit tests",
+]
+
+# ------------------ Coverage .py configuration ------------------
+[tool.coverage.run]
+source = ["symbolic_agi"]
+omit   = ["*/tests/*","*/test_*.py","*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "if self.debug:",
+  "if settings.DEBUG",
+  "raise AssertionError",
+  "raise NotImplementedError",
+  "if 0:",
+  "if __name__ == .__main__.:",
+  "class .*\\bProtocol\\):",
+  "@(abc\\.)?abstractmethod",
+]
+
+# -------------------- Black formatter config -------------------
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+# ------------------ setuptools (for IDEs) -----------------------
+[tool.setuptools]
+packages = ["symbolic_agi"]
+[tool.setuptools.package-dir]
+symbolic_agi = "symbolic_agi"
