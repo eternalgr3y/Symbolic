@@ -29,14 +29,14 @@ class SymbolicAGI:
             
             # ...existing code...
         
-        # *** LEARNING FROM SUCCESS ***
-        if overall_result['status'] == 'success':
-            learning_summary = await self._reflect_on_success(goal, results)
-            if learning_summary:
-                overall_result['learning'] = learning_summary
-                await self.tools.use_tool("knowledge.add_knowledge", {"content": learning_summary})
+            # *** LEARNING FROM SUCCESS ***
+            if overall_result['status'] == 'success':
+                learning_summary = await self._reflect_on_success(goal, results)
+                if learning_summary:
+                    overall_result['learning'] = learning_summary
+                    await self.tools.use_tool("knowledge.add_knowledge", {"content": learning_summary})
 
-        return overall_result
+            return overall_result
 
     async def _reflect_on_replan(self, original_step: dict, new_steps: list, context: list) -> str:
         """Analyzes a failed step and the successful recovery to create a new rule."""
@@ -67,6 +67,3 @@ class SymbolicAGI:
         if "No generalization possible." in learning:
             return None
         return learning
-
-    async def replan(self, current_step_index: int, results: list):
-        # ...existing code...

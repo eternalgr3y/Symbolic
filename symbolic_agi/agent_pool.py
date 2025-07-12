@@ -345,3 +345,15 @@ class DynamicAgentPool:
             ) / agent["tasks_completed"]
             
             return None
+       
+# ------------------------------------------------------------------
+#  Stub so tests that import AgentPerformanceMetrics don't explode.
+# ------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+@dataclass
+class AgentPerformanceMetrics:
+    tasks_completed: int = 0
+    avg_response_time: float = 0.0
+    failures: int = 0
